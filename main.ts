@@ -12,7 +12,7 @@
 //
 // stdout is reserved for framed JSON-RPC. Log to stderr only. Never console.log.
 
-import { readFileSync, readdirSync, readlinkSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, readlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -41,7 +41,7 @@ function rpcHandle(msg: any) {
       rpcSend({ jsonrpc: "2.0", id, result: { protocol_version: 1, capabilities: {} } });
       if (!serverStarted) {
         serverStarted = true;
-        setTimeout(startServer, 0);
+        setTimeout(() => void startServer(), 0);
       }
       return;
     }
@@ -97,26 +97,47 @@ function runDir(): string {
   return join(base, "run");
 }
 
-/** The daemon that spawned us (pid == ppid); else the profile's daemon.json. */
-function findDaemon(): DaemonInfo {
+/**
+ * The daemon that spawned us: the `daemon*.json` whose pid == our ppid. NO
+ * fallback — an in-process `synaps` also loads global plugins, and silently
+ * bridging it to the default daemon.json pointed the web at the WRONG host
+ * (S335 bug). Non-daemon hosts stay dormant instead.
+ */
+function hostDaemon(): DaemonInfo | null {
   if (process.env.SYNAPS_WEB_DAEMON_SOCKET) {
+    // standalone/dev only — the daemon scrubs env, so this never reaches an extension
     return { socket: process.env.SYNAPS_WEB_DAEMON_SOCKET, protocol_version: Number(process.env.SYNAPS_WEB_PROTOCOL ?? 3), daemon_version: "?", profile: null, pid: 0 };
   }
   const dir = runDir();
-  const candidates = readdirSync(dir).filter((f) => /^daemon(-.+)?\.json$/.test(f));
-  const parsed = candidates.flatMap((f) => {
+  let files: string[] = [];
+  try {
+    files = readdirSync(dir).filter((f) => /^daemon(-.+)?\.json$/.test(f));
+  } catch {
+    return null;
+  }
+  for (const f of files) {
     try {
-      return [JSON.parse(readFileSync(join(dir, f), "utf8"))];
-    } catch {
-      return [];
-    }
-  });
-  const mine = parsed.find((d) => d.pid === process.ppid);
-  if (mine) return mine;
-  const prof = process.env.SYNAPS_PROFILE;
-  const want = prof ? `daemon-${prof}.json` : "daemon.json";
-  if (existsSync(join(dir, want))) return JSON.parse(readFileSync(join(dir, want), "utf8"));
-  throw new Error(`no daemon.json for ppid ${process.ppid} in ${dir}`);
+      const d = JSON.parse(readFileSync(join(dir, f), "utf8"));
+      if (d.pid === process.ppid) return d;
+    } catch {}
+  }
+  return null;
+}
+
+function findDaemon(): DaemonInfo {
+  const d = hostDaemon();
+  if (!d) throw new Error(`host pid ${process.ppid} is not a registered synaps daemon`);
+  return d;
+}
+
+/** Fast pre-check: a daemon's argv contains the `daemon` subcommand. */
+function hostLooksLikeDaemon(): boolean {
+  if (process.env.SYNAPS_WEB_DAEMON_SOCKET) return true;
+  try {
+    return readFileSync(`/proc/${process.ppid}/cmdline`, "utf8").split("\0").includes("daemon");
+  } catch {
+    return false;
+  }
 }
 
 /** Working dir for sessions the browser creates: the daemon's own cwd. */
@@ -229,7 +250,20 @@ function flushUds(d: WsData) {
   if (n > 0) d.outBuf = d.outBuf.subarray(n);
 }
 
-function startServer() {
+async function startServer() {
+  if (!hostLooksLikeDaemon()) {
+    log(`host pid ${process.ppid} is not a synaps daemon (in-process session?) — staying dormant, not binding :${PORT}`);
+    return;
+  }
+  let host: DaemonInfo | null = null;
+  for (let i = 0; i < 40 && !host; i++) {
+    host = hostDaemon();
+    if (!host) await Bun.sleep(250);
+  }
+  if (!host) {
+    log(`no daemon*.json for host pid ${process.ppid} after 10s — staying dormant`);
+    return;
+  }
   try {
     server = Bun.serve<WsData, {}>({
       hostname: HOST,
@@ -359,8 +393,8 @@ function startServer() {
     log(`not serving: ${e}`);
     return;
   }
-  log(`serving on http://${HOST}:${PORT}`);
-  void writeUrlFile();
+  log(`serving on http://${HOST}:${PORT} → ${host.socket} (profile ${host.profile ?? "default"})`);
+  writeUrlFile(host.profile);
 }
 
 let urlPath: string | null = null;
@@ -368,17 +402,7 @@ function urlFile(): string {
   return urlPath ?? join(runDir(), "synaps-web.url");
 }
 
-/** daemon.json is written just after extension discovery — retry briefly. */
-async function writeUrlFile() {
-  let profile: string | null = process.env.SYNAPS_PROFILE ?? null;
-  for (let i = 0; i < 40; i++) {
-    try {
-      profile = findDaemon().profile;
-      break;
-    } catch {
-      await Bun.sleep(250);
-    }
-  }
+function writeUrlFile(profile: string | null) {
   urlPath = join(runDir(), profile ? `synaps-web-${profile}.url` : "synaps-web.url");
   try {
     writeFileSync(urlPath, `http://${HOST}:${PORT}/?token=${TOKEN}\n`, { mode: 0o600 });
