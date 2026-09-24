@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>synaps · web</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header id="top">
+    <div class="brand"><span class="glyph">◆</span> synaps<span class="dim">·web</span></div>
+    <div id="sess-title" class="sess-title">no session</div>
+    <div id="clients" class="clients"></div>
+    <div id="conn" class="conn"><span class="dot"></span><span id="conn-text">connecting…</span></div>
+  </header>
+
+  <div id="body">
+    <aside id="side">
+      <div class="side-head">
+        <span>sessions</span>
+        <button id="new-session" class="ghost" title="Create a new session in this daemon">+ new</button>
+      </div>
+      <ul id="sessions"></ul>
+      <div id="daemon-info" class="daemon-info"></div>
+    </aside>
+
+    <main id="main">
+      <div id="transcript"></div>
+      <div id="composer-wrap">
+        <div id="watch-bar" class="watch-bar hidden">
+          <span id="watch-text">👁 watching</span>
+          <button id="takeover" class="warn">take over</button>
+        </div>
+        <div id="composer">
+          <textarea id="input" rows="1" placeholder="Message — Enter to send, Shift+Enter for newline, Esc to stop"></textarea>
+          <button id="stop" class="danger hidden" title="Abort the running turn (Esc)">■ stop</button>
+          <button id="send" class="primary">send</button>
+        </div>
+      </div>
+      <footer id="status">
+        <span id="st-model"></span>
+        <span id="st-tokens"></span>
+        <span id="st-cost"></span>
+        <span id="st-state"></span>
+        <span class="spacer"></span>
+        <button id="toggle-raw" class="ghost small">frames: <span id="frame-count">0</span></button>
+      </footer>
+    </main>
+
+    <aside id="raw" class="hidden"><pre id="raw-log"></pre></aside>
+  </div>
+
+  <div id="modal" class="hidden">
+    <div class="modal-card">
+      <div id="modal-title" class="modal-title"></div>
+      <div id="modal-prompt" class="modal-prompt"></div>
+      <input id="modal-secret" type="password" class="hidden" autocomplete="off" />
+      <div class="modal-actions">
+        <button id="modal-no" class="ghost">deny</button>
+        <button id="modal-yes" class="primary">allow</button>
+      </div>
+    </div>
+  </div>
+  <div id="toast" class="hidden"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

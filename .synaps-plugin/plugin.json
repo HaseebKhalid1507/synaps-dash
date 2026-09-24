@@ -1,0 +1,15 @@
+{
+  "name": "synaps-web",
+  "version": "0.0.1",
+  "description": "Browser client for the synaps session daemon — attach to live sessions from a web page, as a peer of the TUI.",
+  "author": "Jawz",
+  "license": "MIT",
+  "extension": {
+    "protocol_version": 1,
+    "runtime": "process",
+    "command": "bun",
+    "args": ["main.ts"],
+    "permissions": ["session.lifecycle"],
+    "hooks": [{ "hook": "on_session_start" }]
+  }
+}
