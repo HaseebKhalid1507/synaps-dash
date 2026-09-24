@@ -227,7 +227,16 @@ function cookieToken(req: Request): string | null {
 
 function originOk(req: Request): boolean {
   const o = req.headers.get("origin");
-  return o === `http://${HOST}:${PORT}` || o === `http://localhost:${PORT}`;
+  if (!o) return false;
+  if (o === `http://${HOST}:${PORT}` || o === `http://localhost:${PORT}`) return true;
+  // Behind a tunnel/proxy (ngrok, Tailscale Funnel…): same-origin only — the
+  // Origin must name the very host the request was addressed to. A page on
+  // another site can never pass this; the host-scoped token cookie stays the gate.
+  let u: URL;
+  try { u = new URL(o); } catch { return false; }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+  const hosts = [req.headers.get("host"), req.headers.get("x-forwarded-host")].filter(Boolean) as string[];
+  return hosts.some((h) => h.split(",")[0].trim().toLowerCase() === u.host.toLowerCase());
 }
 
 type WsData = {
@@ -272,11 +281,12 @@ async function startServer() {
         const url = new URL(req.url);
         // Token bootstrap: ?token=… → HttpOnly cookie, strip it from the URL.
         const qt = url.searchParams.get("token");
+        const secure = url.protocol === "https:" || (req.headers.get("x-forwarded-proto") || "").split(",")[0].trim() === "https";
         if (qt !== null) {
           if (!tokenOk(qt)) return new Response("bad token\n", { status: 401 });
           return new Response(null, {
             status: 302,
-            headers: { location: "/", "set-cookie": `${COOKIE}=${TOKEN}; HttpOnly; SameSite=Strict; Path=/` },
+            headers: { location: "/", "set-cookie": `${COOKIE}=${TOKEN}; HttpOnly; SameSite=Strict; Path=/${secure ? "; Secure" : ""}` },
           });
         }
         if (!tokenOk(cookieToken(req))) {

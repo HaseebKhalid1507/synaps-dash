@@ -275,7 +275,7 @@ function query(q, cb) {
 
 function connect() {
   setConn("", "connecting…");
-  const ws = new WebSocket(`ws://${location.host}/ws`);
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
   S.ws = ws;
   ws.onopen = () => { S.retry = 0; };
   ws.onmessage = (m) => onFrame(JSON.parse(m.data), m.data);
