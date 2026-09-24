@@ -1,4 +1,4 @@
-// Dev probe: drive the daemon THROUGH the synaps-web bridge exactly like a
+// Dev probe: drive the daemon THROUGH the synaps-dash bridge exactly like a
 // browser would (cookie + Origin), capture every frame for shape reference.
 //   bun test/probe.ts [profile] [prompt]
 // Writes all frames to /tmp/sw-probe.jsonl; prints a compact trace.
@@ -8,14 +8,14 @@ import { homedir } from "node:os";
 
 const profile = process.argv[2] ?? "webproto";
 const prompt = process.argv[3] ?? "Say hello in exactly five words. Do not use any tools.";
-const url = readFileSync(join(homedir(), ".synaps-cli/run", `synaps-web-${profile}.url`), "utf8").trim();
+const url = readFileSync(join(homedir(), ".synaps-cli/run", `synaps-dash-${profile}.url`), "utf8").trim();
 const u = new URL(url);
 const token = u.searchParams.get("token")!;
 const origin = `${u.protocol}//${u.host}`;
 const out = "/tmp/sw-probe.jsonl";
 writeFileSync(out, "");
 
-const ws = new WebSocket(`ws://${u.host}/ws`, { headers: { Cookie: `synaps_web=${token}`, Origin: origin } } as any);
+const ws = new WebSocket(`ws://${u.host}/ws`, { headers: { Cookie: `synaps_dash=${token}`, Origin: origin } } as any);
 let sid: string | null = null;
 let me: number | null = null;
 let phase: "boot" | "turn" | "filter" | "done" = "boot";

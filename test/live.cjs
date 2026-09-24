@@ -17,7 +17,7 @@ const dumpFn = () => ({
   const profile = process.argv[2] || "webproto";
   const ti = process.argv.indexOf("--takeover");
   const takeoverPrompt = ti > 0 ? process.argv[ti + 1] : null;
-  const url = fs.readFileSync(`${process.env.HOME}/.synaps-cli/run/synaps-web-${profile}.url`, "utf8").trim();
+  const url = fs.readFileSync(`${process.env.HOME}/.synaps-cli/run/synaps-dash-${profile}.url`, "utf8").trim();
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
   const errs = [];

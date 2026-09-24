@@ -1,4 +1,4 @@
-// synaps-web — a SynapsCLI extension that serves a browser client for the
+// synaps-dash — a SynapsCLI extension that serves a browser client for the
 // session daemon. Zero changes to synaps: the daemon spawns this process like
 // any extension; we answer the extension JSON-RPC on stdio, and separately
 // bridge browser WebSockets to the daemon's own client socket (daemon.sock),
@@ -12,13 +12,13 @@
 //
 // stdout is reserved for framed JSON-RPC. Log to stderr only. Never console.log.
 
-import { readFileSync, readdirSync, readlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, readlinkSync, writeFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
-const VERSION = "0.0.1";
-const log = (...a: unknown[]) => process.stderr.write(`[synaps-web] ${a.map(String).join(" ")}\n`);
+const VERSION = "0.1.0-dev";
+const log = (...a: unknown[]) => process.stderr.write(`[synaps-dash] ${a.map(String).join(" ")}\n`);
 
 // ── extension JSON-RPC over stdio (Content-Length framing, LSP-style) ─────────
 
@@ -104,9 +104,9 @@ function runDir(): string {
  * (S335 bug). Non-daemon hosts stay dormant instead.
  */
 function hostDaemon(): DaemonInfo | null {
-  if (process.env.SYNAPS_WEB_DAEMON_SOCKET) {
+  if (process.env.SYNAPS_DASH_DAEMON_SOCKET) {
     // standalone/dev only — the daemon scrubs env, so this never reaches an extension
-    return { socket: process.env.SYNAPS_WEB_DAEMON_SOCKET, protocol_version: Number(process.env.SYNAPS_WEB_PROTOCOL ?? 3), daemon_version: "?", profile: null, pid: 0 };
+    return { socket: process.env.SYNAPS_DASH_DAEMON_SOCKET, protocol_version: Number(process.env.SYNAPS_DASH_PROTOCOL ?? 3), daemon_version: "?", profile: null, pid: 0 };
   }
   const dir = runDir();
   let files: string[] = [];
@@ -132,7 +132,7 @@ function findDaemon(): DaemonInfo {
 
 /** Fast pre-check: a daemon's argv contains the `daemon` subcommand. */
 function hostLooksLikeDaemon(): boolean {
-  if (process.env.SYNAPS_WEB_DAEMON_SOCKET) return true;
+  if (process.env.SYNAPS_DASH_DAEMON_SOCKET) return true;
   try {
     return readFileSync(`/proc/${process.ppid}/cmdline`, "utf8").split("\0").includes("daemon");
   } catch {
@@ -195,21 +195,106 @@ function filterFrame(f: any): Verdict {
 // ── HTTP + WebSocket server ───────────────────────────────────────────────────
 
 // NOTE: the daemon scrubs extension env to HOME/LANG/PATH/TERM/XDG_RUNTIME_DIR,
-// so SYNAPS_* never reach us. Port comes from `extension.synaps-web.port = N`
+// so SYNAPS_* never reach us. Port comes from `extension.synaps-dash.port = N`
 // in the profile config (delivered in initialize.params.config); env is a
 // fallback for standalone runs only.
-let PORT = Number(process.env.SYNAPS_WEB_PORT ?? 7717);
+let PORT = Number(process.env.SYNAPS_DASH_PORT ?? 7717);
 const HOST = "127.0.0.1";
 const TOKEN = randomBytes(24).toString("hex");
-const COOKIE = "synaps_web";
+const COOKIE = "synaps_dash";
 const WEB_DIR = resolve(import.meta.dir, "web");
 const STATIC: Record<string, string> = {
   "/": "index.html",
   "/index.html": "index.html",
   "/app.js": "app.js",
   "/style.css": "style.css",
+  "/fonts/InterVariable.woff2": "fonts/InterVariable.woff2",
 };
-const MIME: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8" };
+const MIME: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", woff2: "font/woff2" };
+
+// ── MXC tap (Myx Color Protocol v1) ──────────────────────────────────────────
+// Myx publishes a 16-token palette derived from album art as NDJSON on
+// $XDG_RUNTIME_DIR/myx/theme.sock (snapshot-on-connect, full state per line).
+// We hold the last-good palette and push it to every browser as
+// {type:"mxc", palette}. Resilience mirrors the synaps TUI subscriber:
+// absent socket → quiet capped backoff; EOF / bye:reload → keep last-good;
+// bye:shutdown → palette:null (browser reverts to the static myx default);
+// newer protocol / oversized line / bad frame → drop + retry; the socket's
+// directory must be owned by our uid (squat defense).
+const MXC_TOKENS = ["primary", "secondary", "accent", "error", "warning", "success", "info", "text", "text_muted",
+  "background", "background_panel", "background_element", "border", "border_active", "border_subtle", "border_dimmest"];
+const MXC_MAX_LINE = 64 * 1024;
+const HEX_RE = /^#[0-9a-fA-F]{6}$/;
+type MxcPalette = { colors: Record<string, string>; fade_ms: number; is_dark: boolean; seq: number };
+let mxc: MxcPalette | null = null;
+const wsClients = new Set<any>();
+
+function mxcFrame(): string {
+  return JSON.stringify({ type: "mxc", palette: mxc });
+}
+function broadcastMxc() {
+  const f = mxcFrame();
+  for (const ws of wsClients) {
+    try { ws.send(f); } catch {}
+  }
+}
+function parseMxcTheme(m: any): MxcPalette | null {
+  if (!m || m.t !== "theme" || typeof m.colors !== "object" || !m.colors) return null;
+  const colors: Record<string, string> = {};
+  for (const k of MXC_TOKENS) {
+    const v = m.colors[k];
+    if (typeof v !== "string" || !HEX_RE.test(v)) return null;
+    colors[k] = v.toLowerCase();
+  }
+  const fade = Number(m.fade_ms);
+  return { colors, fade_ms: Number.isFinite(fade) ? Math.max(0, Math.min(fade, 5000)) : 600, is_dark: m.is_dark !== false, seq: Number(m.seq) || 0 };
+}
+async function mxcLoop() {
+  const uid = typeof process.getuid === "function" ? process.getuid() : -1;
+  const dir = join(process.env.XDG_RUNTIME_DIR || `/run/user/${uid}`, "myx");
+  const sock = join(dir, "theme.sock");
+  let backoff = 1000;
+  for (;;) {
+    let ok = false;
+    try { ok = statSync(dir).uid === uid; } catch {}
+    if (ok) {
+      await new Promise<void>((done) => {
+        let buf = "";
+        const dec = new TextDecoder();
+        const finish = () => done();
+        Bun.connect({
+          unix: sock,
+          socket: {
+            data(s, chunk) {
+              buf += dec.decode(chunk, { stream: true });
+              let nl: number;
+              while ((nl = buf.indexOf("\n")) >= 0) {
+                const line = buf.slice(0, nl);
+                buf = buf.slice(nl + 1);
+                if (!line.trim()) continue;
+                let m: any;
+                try { m = JSON.parse(line); } catch { continue; } // malformed line: skip
+                if (Number(m.v) > 1) { log("mxc: newer protocol v" + m.v + " — dropping"); s.end(); return; }
+                if (m.t === "bye") {
+                  if (m.reason === "shutdown") { mxc = null; broadcastMxc(); }
+                  s.end();
+                  return;
+                }
+                const p = parseMxcTheme(m);
+                if (p) { mxc = p; backoff = 1000; broadcastMxc(); }
+              }
+              if (buf.length > MXC_MAX_LINE) { log("mxc: oversized line — dropping"); s.end(); }
+            },
+            close: finish,
+            error: finish,
+          },
+        }).catch(finish);
+      });
+    }
+    await Bun.sleep(backoff);
+    backoff = Math.min(backoff * 2, 30_000);
+  }
+}
 
 let server: ReturnType<typeof Bun.serve> | null = null;
 let nextConn = 1;
@@ -280,7 +365,7 @@ async function startServer() {
           });
         }
         if (!tokenOk(cookieToken(req))) {
-          return new Response(`synaps-web: open the URL from ${urlFile()}\n`, { status: 401 });
+          return new Response(`synaps-dash: open the URL from ${urlFile()}\n`, { status: 401 });
         }
         if (url.pathname === "/ws") {
           if (!originOk(req)) return new Response("bad origin\n", { status: 403 });
@@ -301,18 +386,20 @@ async function startServer() {
         if (!file) return new Response("not found\n", { status: 404 });
         const ext = file.split(".").pop()!;
         return new Response(Bun.file(join(WEB_DIR, file)), {
-          headers: { "content-type": MIME[ext], "cache-control": "no-store" },
+          headers: { "content-type": MIME[ext], "cache-control": ext === "woff2" ? "public, max-age=31536000, immutable" : "no-store" },
         });
       },
       websocket: {
         maxPayloadLength: 4 * 1024 * 1024,
         async open(ws) {
           const d = ws.data;
+          wsClients.add(ws);
+          ws.send(mxcFrame()); // palette first, so the UI paints in album colors before any daemon frame
           let info: DaemonInfo;
           try {
             info = findDaemon();
           } catch (e) {
-            ws.send(JSON.stringify({ type: "error", session_id: null, message: `synaps-web: ${e}` }));
+            ws.send(JSON.stringify({ type: "error", session_id: null, message: `synaps-dash: ${e}` }));
             ws.close(1011, "no daemon");
             return;
           }
@@ -346,7 +433,7 @@ async function startServer() {
               },
             });
           } catch (e) {
-            ws.send(JSON.stringify({ type: "error", session_id: null, message: `synaps-web: cannot reach daemon at ${info.socket}: ${e}` }));
+            ws.send(JSON.stringify({ type: "error", session_id: null, message: `synaps-dash: cannot reach daemon at ${info.socket}: ${e}` }));
             ws.close(1011, "daemon unreachable");
             return;
           }
@@ -354,9 +441,9 @@ async function startServer() {
           const hello = {
             type: "hello",
             protocol_version: info.protocol_version,
-            client: { kind: "server", terminal: null, instance: `synaps-web#${d.id}`, history: "digest", tail_items: 200 },
+            client: { kind: "server", terminal: null, instance: `synaps-dash#${d.id}`, history: "digest", tail_items: 200 },
             cwd: daemonCwd(),
-            client_version: `synaps-web/${VERSION}`,
+            client_version: `synaps-dash/${VERSION}`,
           };
           udsWrite(d, JSON.stringify(hello) + "\n");
           log(`conn #${d.id} → ${info.socket} (protocol v${info.protocol_version})`);
@@ -367,12 +454,12 @@ async function startServer() {
           try {
             f = JSON.parse(typeof raw === "string" ? raw : raw.toString());
           } catch {
-            ws.send(JSON.stringify({ type: "error", session_id: null, message: "synaps-web: invalid JSON" }));
+            ws.send(JSON.stringify({ type: "error", session_id: null, message: "synaps-dash: invalid JSON" }));
             return;
           }
           const v = filterFrame(f);
           if (!v.ok) {
-            ws.send(JSON.stringify({ type: "error", session_id: null, message: `synaps-web: refused — ${v.why}` }));
+            ws.send(JSON.stringify({ type: "error", session_id: null, message: `synaps-dash: refused — ${v.why}` }));
             return;
           }
           const line = JSON.stringify(v.frame) + "\n";
@@ -381,6 +468,7 @@ async function startServer() {
         },
         close(ws) {
           const d = ws.data;
+          wsClients.delete(ws);
           // Socket close = Detach on the daemon side; the turn keeps running.
           try { d.uds?.end(); } catch {}
           log(`conn #${d.id} closed`);
@@ -394,16 +482,17 @@ async function startServer() {
     return;
   }
   log(`serving on http://${HOST}:${PORT} → ${host.socket} (profile ${host.profile ?? "default"})`);
+  void mxcLoop();
   writeUrlFile(host.profile);
 }
 
 let urlPath: string | null = null;
 function urlFile(): string {
-  return urlPath ?? join(runDir(), "synaps-web.url");
+  return urlPath ?? join(runDir(), "synaps-dash.url");
 }
 
 function writeUrlFile(profile: string | null) {
-  urlPath = join(runDir(), profile ? `synaps-web-${profile}.url` : "synaps-web.url");
+  urlPath = join(runDir(), profile ? `synaps-dash-${profile}.url` : "synaps-dash.url");
   try {
     writeFileSync(urlPath, `http://${HOST}:${PORT}/?token=${TOKEN}\n`, { mode: 0o600 });
     log(`url + token written to ${urlPath}`);
