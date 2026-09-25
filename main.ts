@@ -17,7 +17,7 @@ import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
-const VERSION = "0.1.0-dev";
+const VERSION = "0.1.0";
 const log = (...a: unknown[]) => process.stderr.write(`[synaps-dash] ${a.map(String).join(" ")}\n`);
 
 // ── extension JSON-RPC over stdio (Content-Length framing, LSP-style) ─────────

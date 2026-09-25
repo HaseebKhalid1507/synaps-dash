@@ -1,8 +1,10 @@
-# synaps-dash
+# synaps·dash
 
-Browser client for the SynapsCLI session daemon, shipped as a **plain extension —
-zero changes to synaps**. A browser tab becomes an ordinary daemon client, a peer
-of the TUI on the same session (same event stream, same input-ownership rules).
+A sleek browser client for the [SynapsCLI](https://github.com/HaseebKhalid1507/SynapsCLI)
+session daemon, shipped as a **plain extension, with zero changes to Synaps**. A browser tab
+becomes an ordinary daemon client, a peer of the TUI on the same session: same event
+stream, same input-ownership rules. Type in the terminal, watch it stream in the browser,
+or the other way round.
 
 ```
 daemon ──spawns──▶ synaps-dash (this extension) ◀── HTTP/WS 127.0.0.1:7717 ──▶ browser tabs
@@ -10,52 +12,121 @@ daemon ──spawns──▶ synaps-dash (this extension) ◀── HTTP/WS 127.
    └──── daemon.sock ◀───┘  one UDS connection per tab, as a normal client (kind "server")
 ```
 
-- `main.ts` — extension (JSON-RPC over stdio) + bridge (Bun HTTP/WS ⇄ daemon UDS).
-- `web/` — vanilla client (no build): transcript, tool cards, thinking, ownership, takeover, prompts.
-- `test/probe.ts` — raw protocol probe through the bridge (+ filter test).
-- `test/headless.cjs`, `test/live.cjs` — Playwright DOM checks (borrows SynapsDASH's playwright).
+## Features
 
-## Run the prototype (sandboxed — never touches the live daemon)
+- **Live, shared sessions.** Attach to any daemon session, see every client (TUI and web)
+  as presence avatars, take over input, answer approval and secret prompts, and switch
+  sessions from the rail.
+- **Album-reactive palette.** Subscribes to [Myx](https://github.com/HaseebKhalid1507)'s
+  MXC colour protocol (`$XDG_RUNTIME_DIR/myx/theme.sock`). The whole UI takes the current
+  album's 16 colour tokens and cross-fades on track change, in sync with the TUI, the
+  desktop and the lights. Falls back to the static myx palette.
+- **Activity timeline.** Consecutive thinking and tool calls batch into one collapsible row
+  ("Thought for 6s · 3 commands · 1 read"). Every step shares one row anatomy on a
+  vertical rail. Tool input renders readably: shell as `$` lines, short args as chips, not
+  raw JSON.
+- **Steering you can follow.** A steer stays pinned at the bottom (`typed <time>`) until
+  the model reads it, then flies to that exact point in the transcript
+  (`received <time> · Ns after typed`). It can also end as sent-as-follow-up,
+  returned-to-input (on cancel) or not-delivered.
+- **Smooth streaming.** The provider sends about 12 characters every ~60ms. synaps-dash
+  buffers them and reveals about 3 characters every frame (default 256ms buffer,
+  `?lag=N` to tune, remembered). Completed paragraphs render once. Only the one being
+  written re-renders.
+- **Motion system.** One vocabulary (expo-out, in-out, a hint of overshoot;
+  120/220/380ms) for message entrances, rows sliding off the rail, ✓ drawing itself,
+  expand and collapse both ways, the send↔stop morph, the gliding session indicator,
+  toasts and sheets. Everything turns off under `prefers-reduced-motion`.
+- **Scroll by intent.** The transcript stays glued to the bottom until you deliberately
+  scroll up (wheel, touch, PageUp/↑/Home, scrollbar). Scrolling back to the bottom, the
+  "New messages" pill, `End` or sending a message re-pins it. Navigation keys scroll the
+  transcript whenever you're not typing.
+- **Markdown** with tables, links, blockquotes and highlighted code blocks with copy.
+
+## Install (on your main daemon)
 
 ```bash
-# profile config: ~/.synaps-cli/webproto/config (global plugins disabled, own sessions)
-mkdir -p /tmp/synaps-dash-sandbox/.synaps/plugins
-ln -sfn ~/Projects/synaps-dash /tmp/synaps-dash-sandbox/.synaps/plugins/synaps-dash
-cd /tmp/synaps-dash-sandbox
-SYNAPS_PROFILE=webproto synaps-dev daemon --profile webproto --detach
-SYNAPS_PROFILE=webproto synaps-dev --profile webproto --attach --new     # the TUI
-xdg-open "$(cat ~/.synaps-cli/run/synaps-dash-webproto.url)"               # the browser
+git clone https://github.com/HaseebKhalid1507/synaps-dash ~/Projects/synaps-dash
+ln -sfn ~/Projects/synaps-dash ~/.synaps-cli/plugins/synaps-dash
+synaps daemon reload                                   # extensions load at daemon start/reload
+xdg-open "$(cat ~/.synaps-cli/run/synaps-dash.url)"     # one-time token → cookie
 ```
 
-Port: `extension.synaps-dash.port = N` in the profile config (env does NOT reach
-extensions — see below). Tear down: `synaps-dev daemon --profile webproto stop`.
+- **Requirements:** [Bun](https://bun.sh) on `PATH`, a Synaps daemon speaking protocol v3.
+- **Port:** 7717 by default. Change it with `extension.synaps-dash.port = N` in the Synaps
+  profile config. Environment variables do **not** reach extensions.
+- **Updating:** the server reads `web/` from disk on every request, so a UI change only
+  needs a page refresh. Changes to `main.ts` need `synaps daemon reload`, which also
+  issues a **new token**, so re-open the URL from the file.
+- **Profiles:** the URL file is `synaps-dash-<profile>.url` for non-default profiles.
 
-## Security boundary (the daemon trusts its uid, so this process is the boundary)
+### Remote access (ngrok, Tailscale…)
 
-- binds 127.0.0.1 only; per-boot random token, `?token=` → HttpOnly SameSite=Strict cookie
-- WS upgrade requires cookie + `Origin` = the page origin
-- bridge does `Hello` itself; the browser may only send `ping`, `sessions`, `attach`, `cmd`, `bye`
+The WebSocket accepts same-origin requests behind a tunnel (the `Origin` must match the
+forwarded host), the cookie is `Secure` over HTTPS, and the client uses `wss://`. So
+`ngrok http 7717`, then open `https://<host>/?token=<token>` once.
+
+⚠️ This exposes an agent with shell access to your machine, guarded only by that token.
+Add tunnel-side auth (`ngrok http 7717 --basic-auth "you:<long-password>"` or OAuth),
+never share the URL, and stop the tunnel when you're done.
+
+## Security boundary
+
+The daemon trusts its uid (0600 socket), so **this process is the boundary**:
+
+- binds `127.0.0.1` only; a per-boot random token, `?token=` → an HttpOnly SameSite=Lax cookie
+- WebSocket upgrade needs the cookie and a loopback or same-origin `Origin`
+- the bridge does the protocol `hello` itself. The browser may only send `ping`,
+  `sessions`, `attach`, `cmd` and `bye`
 - `cmd` allowlist: submit steer cancel answer query save compact new_session engine_command detach
-- `attach create` config sanitised (no `prompt_manifest`/`env`; `auto_approve_confirms=false`)
-- `shutdown` / `reload` / `purge` / `hello` / `end` refused (tested in `test/probe.ts`)
+- `attach create` config is sanitised (no `prompt_manifest`/`env`; `auto_approve_confirms=false`)
+- `shutdown` / `reload` / `purge` / `hello` / `end` are refused
+- serves only when hosted by a registered daemon (its `daemon*.json` pid == our ppid).
+  An in-process Synaps that also loads the plugin stays dormant.
 
-## Findings (verified on SynapsCLI dev @ 7f277492, daemon 0.9.1, protocol v3)
+## Development
 
-- Extensions spawn once per daemon (thin TUIs don't load extensions); `daemon reload`
-  stops them before exec and respawns after — port released/rebound cleanly.
-- The daemon **scrubs extension env** to `HOME LANG PATH TERM XDG_RUNTIME_DIR`. We find
-  our daemon via `~/.synaps-cli/run/daemon*.json` whose `pid == ppid`.
-- `docs/daemon-mode.md` says protocol v1; code + live daemon are **v3** (docs stale).
-- **Upstream gap 1:** `TurnStarted.user_text` is only set for queued turns, so a *peer*
-  client never sees another client's prompt text. The TUI shows the reply without the
-  prompt; synaps-dash works around it with a `display_tail` query.
-- **Upstream gap 2:** `Attached.replay` holds the *last* turn's ring even after it
-  finished (cleared only at the next turn start), and the TUI applies it
-  unconditionally → likely double-render of the last turn when a second TUI attaches
-  after a finished turn. synaps-dash applies replay only when `streaming`.
-- Cancel is an input-owner command → the web needs "take over" to stop a turn.
+A separate sandbox profile keeps experiments away from your live daemon:
 
-## Not done yet
+```bash
+# ~/.synaps-cli/webproto/config: its own sessions, other plugins disabled,
+#   extension.synaps-dash.port = 7718
+mkdir -p /tmp/synaps-web-sandbox/.synaps/plugins
+ln -sfn "$PWD" /tmp/synaps-web-sandbox/.synaps/plugins/synaps-dash
+cd /tmp/synaps-web-sandbox && SYNAPS_PROFILE=webproto synaps daemon --profile webproto --detach
+xdg-open "$(cat ~/.synaps-cli/run/synaps-dash-webproto.url)"
+```
 
-Reconnect ownership restore (`reconnect_of`), slash commands, subagent panel, diffs,
-attachments, lag → auto-resync, markdown tables/links, mobile layout, remote access.
+The tests are Playwright scripts that drive real turns against the sandbox:
+
+| Test | Covers |
+|---|---|
+| `test/redesign.cjs` | palette, fonts, thinking, tool card, markdown table/code, copy, mobile |
+| `test/batching.cjs` | activity batching, steer delivery, mid-turn ordering, replay |
+| `test/steer-move.cjs` | steer pinned while queued, lands where the model read it |
+| `test/motion.cjs` | animated open/close, ✓ draw, rail indicator, reduced motion |
+| `test/scroll-pin.cjs` | stick-to-bottom by intent, unpin/re-pin gestures |
+| `test/stream-probe.cjs` | streaming smoothness: wire cadence vs per-frame reveal |
+| `test/shot-activity.cjs` | screenshot of an expanded activity batch |
+| `test/probe.ts` | raw protocol through the bridge + frame-filter refusals |
+
+## Protocol notes (verified on SynapsCLI 0.9.1, protocol v3)
+
+- Extensions spawn once per daemon (thin TUIs don't load extensions). `daemon reload`
+  stops them before exec and respawns them after, and the port is rebound cleanly.
+- The daemon **scrubs extension env** down to `HOME LANG PATH TERM XDG_RUNTIME_DIR`.
+- `TurnStarted.user_text` is only set for queued turns, so a *peer* never sees another
+  client's prompt text. synaps-dash fills it in with a `display_tail` query.
+- `Attached.replay` holds the *last* turn even after it finished, so synaps-dash applies
+  it only while streaming.
+- The daemon broadcasts its CLI attach hint ("input is owned by client #N …") to every
+  client, and synaps-dash filters it out.
+- Streaming cadence is set by the provider (~12 chars / ~60ms from Anthropic, measured
+  directly). The daemon → socket hop adds ~0.1ms.
+
+## Roadmap
+
+Edit diffs · subagent panel · long-turn handling · ⌘K command palette · slash commands ·
+presence icons · attachments · lag → auto-resync · reconnect ownership restore.
+
+MIT
