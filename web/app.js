@@ -1766,8 +1766,10 @@ $("send").onclick = doSend;
 $("takeover").onclick = () => { if (S.sid) switchTo(S.sid, "takeover"); };
 $("new-session").onclick = () => switchTo(null, "mirror", true);
 // Rail drawer. CSS moves the panel (asymmetric curves, see style.css #app);
-// on open, the session rows that are actually on screen cascade in after it,
-// each a beat later, with a hint of overshoot.
+// on open, EVERY session row that's on screen cascades in after it with a hint
+// of overshoot. No count cap (tall screens show 30+ rows): instead the whole
+// wave fits a fixed window — the per-row beat shrinks as the row count grows.
+const CASCADE_WINDOW_MS = 420, CASCADE_STEP_MS = 28;
 function railShown() { const a = $("app").classList; return innerWidth < 860 ? a.contains("rail-open") : !a.contains("rail-collapsed"); }
 function toggleRail() {
   $("app").classList.toggle(innerWidth < 860 ? "rail-open" : "rail-collapsed");
@@ -1776,10 +1778,10 @@ function toggleRail() {
   if (!shown || !motion()) return;
   const box = $("rail").querySelector(".rail-scroll").getBoundingClientRect();
   const rows = [...$("rail").querySelectorAll(".rail-scroll li[data-id], .rail-scroll .rail-label")]
-    .filter((li) => { const r = li.getBoundingClientRect(); return r.bottom > box.top && r.top < box.bottom; })
-    .slice(0, 14);
+    .filter((li) => { const r = li.getBoundingClientRect(); return r.bottom > box.top && r.top < box.bottom; });
+  const step = rows.length > 1 ? Math.min(CASCADE_STEP_MS, CASCADE_WINDOW_MS / (rows.length - 1)) : 0;
   rows.forEach((li, i) => anim(li, [{ opacity: 0, transform: "translateX(-14px)" }, { opacity: 1, transform: "none" }],
-    { duration: 380, delay: 140 + i * 28, easing: EASE.pop, fill: "backwards" }));
+    { duration: 380, delay: 140 + i * step, easing: EASE.pop, fill: "backwards" }));
 }
 $("rail-toggle").setAttribute("aria-expanded", String(railShown()));
 $("rail-toggle").onclick = toggleRail;

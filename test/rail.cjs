@@ -116,6 +116,30 @@ function shape(s, key, from, to) {
   expect("open curve: fast launch → soft landing", R.curveOpen.first > R.curveOpen.middle && R.curveOpen.middle > R.curveOpen.last && R.curveOpen.first > 4 * R.curveOpen.last, R.curveOpen);
   expect("open curve: solid panel at every step", R.curveOpen.maxGap <= 1, R.curveOpen.maxGap);
 
+  // ── cascade on a tall screen: every on-screen row animates, no cap ──
+  await p.setViewportSize({ width: 1400, height: 1700 });
+  await p.waitForTimeout(300);
+  await p.click("#rail-toggle"); // close
+  await p.waitForTimeout(600);
+  R.cascade = await p.evaluate(async () => {
+    document.getElementById("rail-toggle").click(); // open
+    await new Promise((r) => requestAnimationFrame(r));
+    const box = document.querySelector("#rail .rail-scroll").getBoundingClientRect();
+    const all = [...document.querySelectorAll("#rail .rail-scroll li[data-id], #rail .rail-scroll .rail-label")];
+    const onScreen = all.filter((el) => { const r = el.getBoundingClientRect(); return r.bottom > box.top && r.top < box.bottom; });
+    const anims = document.getAnimations().filter((a) => all.includes(a.effect?.target));
+    const targets = new Set(anims.map((a) => a.effect.target));
+    const delays = anims.map((a) => a.effect.getTiming().delay);
+    return { total: all.length, onScreen: onScreen.length, animated: targets.size, perRow: anims.length, offScreenAnimated: [...targets].filter((t) => !onScreen.includes(t)).length, missing: onScreen.filter((t) => !targets.has(t)).length, maxDelay: Math.max(...delays) };
+  });
+  expect("tall screen: more than the old 14-row cap on screen", R.cascade.onScreen > 14, R.cascade);
+  expect("tall screen: every on-screen row animates, exactly once", R.cascade.missing === 0 && R.cascade.animated === R.cascade.onScreen && R.cascade.perRow === R.cascade.onScreen, R.cascade);
+  expect("tall screen: off-screen rows untouched", R.cascade.offScreenAnimated === 0, R.cascade);
+  expect("tall screen: whole wave starts within the window", R.cascade.maxDelay <= 140 + 420 + 1, R.cascade.maxDelay);
+  await p.waitForTimeout(900);
+  await p.setViewportSize({ width: 1400, height: 900 });
+  await p.waitForTimeout(300);
+
   // ── mobile overlay ──
   await p.setViewportSize({ width: 760, height: 900 });
   await p.waitForTimeout(500);
