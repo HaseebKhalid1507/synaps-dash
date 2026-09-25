@@ -17,6 +17,10 @@ daemon ──spawns──▶ synaps-dash (this extension) ◀── HTTP/WS 127.
 - **Live, shared sessions.** Attach to any daemon session, see every client (TUI and web)
   as presence avatars, take over input, answer approval and secret prompts, and switch
   sessions from the rail.
+- **Session rail with history.** The rail shows **Live** sessions (in the daemon now) and,
+  below them, **Recent** sessions that live only on disk. Click a live one to attach; click a
+  recent one to resume it (it loads its history and becomes live). Recent sessions are read
+  header-only from `~/.synaps-cli/sessions` (`/api/sessions`) — never the message bodies.
 - **Album-reactive palette.** Subscribes to [Myx](https://github.com/HaseebKhalid1507)'s
   MXC colour protocol (`$XDG_RUNTIME_DIR/myx/theme.sock`). The whole UI takes the current
   album's 16 colour tokens and cross-fades on track change, in sync with the TUI, the

@@ -118,18 +118,21 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
 .btn-new:active { transform: scale(.98); }
 .btn-new kbd { margin-left: auto; }
 .rail-label { padding: 12px 20px 6px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
-#sessions { position: relative; list-style: none; margin: 0; padding: 0 8px; overflow-y: auto; flex: 1; scrollbar-width: thin; }
-#sessions li {
+.rail-scroll { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+#sessions, #past-sessions { position: relative; list-style: none; margin: 0; padding: 0 8px; }
+#sessions li, #past-sessions li {
   position: relative; padding: 9px 12px 9px 14px; border-radius: 10px; cursor: pointer; margin-bottom: 2px;
   transition: background var(--fast);
 }
-#sessions li:hover { background: color-mix(in oklab, var(--elem) 70%, transparent); }
-#sessions li.active { background: color-mix(in oklab, var(--elem) 95%, transparent); }
+#sessions li:hover, #past-sessions li:hover { background: color-mix(in oklab, var(--elem) 70%, transparent); }
+#sessions li.active, #past-sessions li.active { background: color-mix(in oklab, var(--elem) 95%, transparent); }
+#past-sessions li.rest .s-title { font-weight: 480; color: color-mix(in oklab, var(--text) 82%, transparent); }
 .s-title { font-size: 13.5px; font-weight: 520; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .s-meta { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); margin-top: 1px; }
-.s-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border-subtle); }
+.s-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border-subtle); flex: none; }
 .s-dot.live { background: var(--success); box-shadow: 0 0 6px color-mix(in oklab, var(--success) 60%, transparent); }
-.rail-empty { color: var(--muted); font-size: 12.5px; padding: 8px 14px; }
+.s-dot.rest { background: var(--border-subtle); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--text) 20%, transparent); background: transparent; }
+.rail-empty { color: var(--muted); font-size: 12.5px; padding: 4px 20px 8px; }
 .rail-foot { padding: 12px 16px; border-top: 1px solid var(--line-soft); font-size: 11.5px; color: var(--muted); display: grid; gap: 6px; }
 .swatches { display: flex; align-items: center; gap: 5px; }
 .swatches span { width: 10px; height: 10px; border-radius: 3px; }
@@ -499,8 +502,8 @@ kbd { font: 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; border: 1p
   transition: transform var(--slow) var(--ease-move), height var(--slow) var(--ease-move), opacity var(--med);
 }
 .rail-ind::before { content: ""; position: absolute; left: 3px; top: 10px; bottom: 10px; width: 3px; border-radius: 3px; background: var(--primary); box-shadow: 0 0 10px var(--primary-glow); }
-#sessions li { position: relative; z-index: 1; transition: background var(--fast); }
-#sessions li.active { background: transparent; }
+#sessions li, #past-sessions li { position: relative; z-index: 1; transition: background var(--fast); }
+#sessions li.active, #past-sessions li.active { background: transparent; }
 
 /* presence crown drops in */
 .av.owner::after { animation: rise 300ms var(--ease-pop) both; }
