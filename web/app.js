@@ -173,6 +173,7 @@ $("jump").onclick = () => { SC.scrollTo({ top: SC.scrollHeight, behavior: "smoot
 // normal output inserts above it. A steer leaves the tray only when an event
 // tells us where it actually entered the conversation.
 const trayEl = () => { const t = document.getElementById("steer-tray"); return t && t.parentNode === T ? t : null; };
+function tray() { let t = trayEl(); if (!t) { t = h("div"); t.id = "steer-tray"; T.append(t); } return t; }
 const add = (node, parent = T) => {
   if (parent === T) T.insertBefore(node, trayEl()); else parent.append(node);
   follow();
@@ -241,19 +242,19 @@ function addSteer(text, by, local, state, ts) {
   const when = h("span", "steer-when");
   meta.append(`steer · ${by} · `, when, " · ", st);
   m.append(h("div", "bubble", text), meta);
-  // Queued: sits where the human typed it. Output the model produces before it
-  // reads the steer flows BELOW (new segment), because the model hasn't seen it.
-  splitAsst();
-  add(m);
+  // Queued: pinned to the bottom (the tray is always the thread's last child);
+  // output the model produces before it reads the steer flows in ABOVE it.
+  tray().append(m);
+  follow();
   const rec = { text, m, st, when, local, state: "", typedAt: toDate(ts), at: null };
   S.steers.push(rec);
   setSteer(rec, state);
   return rec;
 }
 const findSteer = (text, states = STEER_OPEN) => S.steers.find((x) => x.text === text && states.includes(x.state));
-// Delivered (or follow-up / returned / lost): move the bubble from where it was
-// typed down to where it took effect — end the current reply segment, drop the
-// bubble at the end of the thread, and let the reply continue below it.
+// Delivered (or follow-up / returned / lost): leave the pinned tray and drop in
+// at the exact point it took effect — end the current reply segment, insert the
+// bubble there, and let the reply continue below it.
 function landSteer(st) {
   if (!st || !st.m.classList.contains("pending")) return;
   splitAsst();
