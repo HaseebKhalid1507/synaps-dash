@@ -42,19 +42,34 @@ daemon ──spawns──▶ synaps-dash (this extension) ◀── HTTP/WS 127.
   "New messages" pill, `End` or sending a message re-pins it. Navigation keys scroll the
   transcript whenever you're not typing.
 - **Markdown** with tables, links, blockquotes and highlighted code blocks with copy.
-- **Settings** (gear bottom-left, or `Ctrl+,`), modelled on the TUI's `/settings`:
+- **Settings** (gear bottom-left, or `Ctrl+,`), modelled on the TUI's `/settings` minus the
+  terminal-only rows (theme, sidecar key, fps):
   - **Session:** model (your config's `favorite_models` + custom), thinking level, context
     window, and advanced tool limits and retries. Applied live to the session through the
     daemon (owner-only, each confirmed with a ✓).
+  - **Synaps config** — the daemon's config file (`~/.synaps-cli/config`, or the profile's):
+    - **Defaults:** default model, thinking, context window, compaction model/mode, favorite models.
+    - **Agent:** tool limits, tool-activation policy, progressive disclosure, retries, event auto-turns.
+    - **Context & memory:** context management, prompt-cache TTL, memory backend.
+    - **Daemon:** idle exit, prompt abandon, parked eviction, quick start, extensions-ready wait.
+    - **Plugins:** turn installed plugins (global + project) on or off.
+    - **Providers:** which providers are set up — status only.
+
+    Every row says when it takes effect. The daemon reads its config **once, at start**, so
+    most changes apply on `synaps daemon reload`; the panel lists what's waiting and gives
+    you the command. (Sessions survive a reload; this page gets a new token.)
   - **Appearance:** palette (Album live / Myx / Midnight / Ember / Mono), text size, density,
     glow, grain.
   - **Motion:** animations System / Full / Reduced, and the stream-smoothing slider.
   - **Behavior:** stick to bottom, send with Enter or Ctrl/⌘+Enter.
   - **About:** connection and version details.
 
-  The browser can change only the 9 session settings the TUI's `/settings` exposes. It
-  cannot change the system prompt or worker-model grants, and it never touches the
-  daemon's config file.
+  What the browser can't touch: the system prompt and worker-model grants (session), and in
+  the config file anything outside a fixed allowlist — provider keys, `server.*` (the web
+  token, allowed origins, auto-approve), `auth.*`, `bridge.*`, `shell.*`. Provider keys and
+  OAuth tokens are never sent to the browser. Config writes are same-origin JSON only,
+  validated by the bridge, and use the same `flock` + atomic rename as Synaps, so they can't
+  collide with a TUI `/settings` write. synaps-dash can't disable itself from the browser.
 
 ## Install (on your main daemon)
 

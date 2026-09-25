@@ -8,16 +8,18 @@
 // Security: the daemon trusts its uid (0600 socket, not an auth boundary), so
 // THIS process is the boundary: loopback bind, per-boot token → HttpOnly
 // cookie, Origin check on upgrade, and a client-frame allowlist (no
-// shutdown/reload/purge, sanitised Attach::Create config).
+// shutdown/reload/purge, sanitised Attach::Create config). Config edits go
+// through /api/config: a closed key allowlist, strict values, same-origin +
+// JSON-only POSTs, and the same flock + atomic rename Synaps uses.
 //
 // stdout is reserved for framed JSON-RPC. Log to stderr only. Never console.log.
 
-import { readFileSync, readdirSync, readlinkSync, writeFileSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, readlinkSync, writeFileSync, statSync, existsSync, openSync, closeSync, renameSync, chmodSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
-const VERSION = "0.2.0";
+const VERSION = "0.1.0";
 const log = (...a: unknown[]) => process.stderr.write(`[synaps-dash] ${a.map(String).join(" ")}\n`);
 
 // ── extension JSON-RPC over stdio (Content-Length framing, LSP-style) ─────────
@@ -197,6 +199,283 @@ function filterFrame(f: any): Verdict {
       // hello (the bridge does the handshake itself), shutdown, reload, purge, …
       return { ok: false, why: `frame type '${f.type}' not allowed from the web` };
   }
+}
+
+// ── Synaps config (the daemon's config file) ──────────────────────────────────
+// The browser may read and write a CLOSED set of keys. Provider keys, server.*,
+// auth.*, bridge.* and shell.* are never readable or writable from here.
+// Semantics mirror agent-core/src/core/config.rs:
+//   read  = <base>/<profile>/config if it exists, else <base>/config
+//   write = <base>/<profile>/config (profile) or <base>/config
+//   lock  = flock(LOCK_EX) on <write dir>/config.lock, then tmp + rename, 0600
+// The daemon loads config ONCE at start (host.reload_config has no callers), so
+// most keys apply after `daemon reload`; `applies` says which.
+
+type Applies = "reload" | "live" | "start" | "launch";
+const MODEL_RE = /^[\w.-]+\/[\w.:-]+$/;
+const oneOf = (...xs: string[]) => (v: string) => xs.includes(v);
+const intIn = (lo: number, hi: number) => (v: string) => /^\d{1,9}$/.test(v) && +v >= lo && +v <= hi;
+const listOf = (re: RegExp, max: number) => (v: string) => {
+  const xs = v.split(",").map((x) => x.trim()).filter(Boolean);
+  return xs.length <= max && xs.every((x) => re.test(x));
+};
+const CONFIG_KEYS: Record<string, { ok: (v: string) => boolean; applies: Applies }> = {
+  model: { ok: (v) => MODEL_RE.test(v), applies: "reload" },
+  thinking: { ok: oneOf("off", "adaptive", "low", "medium", "high", "xhigh", "max"), applies: "reload" },
+  context_window: { ok: oneOf("200k", "1m"), applies: "reload" },
+  compaction_model: { ok: (v) => MODEL_RE.test(v), applies: "reload" },
+  compaction_mode: { ok: oneOf("remote", "local"), applies: "reload" },
+  favorite_models: { ok: listOf(MODEL_RE, 40), applies: "live" },
+  api_retries: { ok: intIn(0, 20), applies: "reload" },
+  refusal_retries: { ok: intIn(0, 10), applies: "reload" },
+  subagent_timeout: { ok: intIn(10, 86400), applies: "reload" },
+  max_tool_output: { ok: intIn(1024, 4 * 1024 * 1024), applies: "reload" },
+  bash_timeout: { ok: intIn(1, 3600), applies: "reload" },
+  bash_max_timeout: { ok: intIn(1, 86400), applies: "reload" },
+  "tools.activation_confirm": { ok: oneOf("auto", "prompt", "deny"), applies: "reload" },
+  progressive_tool_disclosure: { ok: oneOf("true", "false"), applies: "reload" },
+  "events.auto_turn": { ok: oneOf("true", "false"), applies: "reload" },
+  "events.auto_turn_cap": { ok: intIn(0, 1000), applies: "reload" },
+  "context_management.mode": { ok: oneOf("off", "auto"), applies: "reload" },
+  cache_ttl: { ok: oneOf("5m", "1h", "hybrid"), applies: "reload" },
+  "memory.backend": { ok: oneOf("legacy", "axel"), applies: "reload" },
+  "daemon.idle_exit_secs": { ok: intIn(0, 604800), applies: "start" },
+  "daemon.prompt_abandon_secs": { ok: intIn(0, 604800), applies: "live" },
+  "daemon.parked_evict_secs": { ok: intIn(0, 604800), applies: "live" },
+  "startup.quick_start": { ok: oneOf("on", "off"), applies: "launch" },
+  "startup.extensions_ready_timeout_secs": { ok: intIn(1, 600), applies: "reload" },
+  disabled_plugins: { ok: listOf(/^[\w.@-]+$/, 64), applies: "reload" },
+};
+const SELF_PLUGIN = "synaps-dash";
+
+function synapsBase(): string {
+  // The daemon scrubs SYNAPS_* from extension env, so this is ~/.synaps-cli in
+  // practice — the same base the daemon resolved (it never sets a custom one
+  // for the live profiles).
+  return process.env.SYNAPS_BASE_DIR || join(homedir(), ".synaps-cli");
+}
+function configPaths() {
+  const base = synapsBase();
+  const profile = hostDaemon()?.profile ?? null;
+  const write = profile ? join(base, profile, "config") : join(base, "config");
+  const read = profile && !existsSync(write) ? join(base, "config") : write;
+  return { base, profile, read, write };
+}
+/** key → raw value; LAST occurrence wins, like the Synaps parser. */
+function parseConfig(text: string): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    m.set(line.slice(0, eq).trim(), line.slice(eq + 1).trim());
+  }
+  return m;
+}
+function readConfig(): Map<string, string> {
+  try { return parseConfig(readFileSync(configPaths().read, "utf8")); } catch { return new Map(); }
+}
+/** Only the allowlisted keys — never provider.*, server.*, auth.*, … */
+function exposedValues(cfg: Map<string, string>): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  for (const k of Object.keys(CONFIG_KEYS)) out[k] = cfg.has(k) ? cfg.get(k)! : null;
+  return out;
+}
+
+// flock via libc: the same advisory lock Synaps takes (fs4 → flock on Linux),
+// so a browser write and a TUI /settings write can't interleave their RMW.
+const LOCK_EX = 2, LOCK_NB = 4, LOCK_UN = 8;
+let flockFn: ((fd: number, op: number) => number) | null | undefined;
+function flock(): ((fd: number, op: number) => number) | null {
+  if (flockFn !== undefined) return flockFn;
+  try {
+    const { dlopen, FFIType } = require("bun:ffi");
+    const lib = dlopen("libc.so.6", { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
+    flockFn = (fd, op) => lib.symbols.flock(fd, op);
+  } catch (e) {
+    log(`flock unavailable (${e}) — config writes disabled`);
+    flockFn = null;
+  }
+  return flockFn;
+}
+async function withConfigLock<T>(dir: string, fn: () => T): Promise<T> {
+  const f = flock();
+  if (!f) throw new Error("cannot lock the config file on this system");
+  const fd = openSync(join(dir, "config.lock"), "a", 0o600);
+  try {
+    const deadline = Date.now() + 3000;
+    while (f(fd, LOCK_EX | LOCK_NB) !== 0) {
+      if (Date.now() > deadline) throw new Error("the config file is locked by another writer — try again");
+      await Bun.sleep(25);
+    }
+    try { return fn(); } finally { f(fd, LOCK_UN); }
+  } finally {
+    closeSync(fd);
+  }
+}
+/**
+ * Set (or with null, remove) one key. Replaces the first live occurrence and
+ * drops later duplicates — the parser is last-wins, so a stale duplicate
+ * further down would otherwise silently override the write. Comments and
+ * every other line are preserved byte-for-byte.
+ */
+function rewriteKey(text: string, key: string, value: string | null): string {
+  const lines = text.split("\n");
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  const out: string[] = [];
+  let done = false;
+  for (const line of lines) {
+    const t = line.trimStart();
+    const eq = t.indexOf("=");
+    const isKey = !t.startsWith("#") && eq > 0 && t.slice(0, eq).trim() === key;
+    if (!isKey) { out.push(line); continue; }
+    if (!done && value !== null) out.push(`${key} = ${value}`);
+    done = true;
+  }
+  if (!done && value !== null) out.push(`${key} = ${value}`);
+  return out.join("\n") + "\n";
+}
+async function writeConfigKey(key: string, value: string | null): Promise<void> {
+  const { profile, write, base } = configPaths();
+  if (profile && !existsSync(write)) {
+    // Synaps would create a one-line profile config, and from then on the
+    // profile reads ONLY that file — every other setting would vanish.
+    throw new Error(`profile '${profile}' has no config of its own (it reads ${join(base, "config")}). Create ${write} first so a write doesn't hide the rest.`);
+  }
+  const dir = write.slice(0, write.lastIndexOf("/"));
+  await withConfigLock(dir, () => {
+    const cur = existsSync(write) ? readFileSync(write, "utf8") : "";
+    const next = rewriteKey(cur, key, value);
+    if (next === cur) return;
+    const tmp = join(dir, "config.tmp");
+    writeFileSync(tmp, next, { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, write);
+  });
+}
+
+/** Config at daemon start (we're spawned right after it loads) — the baseline
+ *  for "which reload-class changes are still waiting for a reload". */
+let bootConfig: Map<string, string> | null = null;
+function pendingReload(cur: Map<string, string>): string[] {
+  if (!bootConfig) return [];
+  return Object.entries(CONFIG_KEYS)
+    .filter(([k, d]) => d.applies === "reload" && (bootConfig!.get(k) ?? null) !== (cur.get(k) ?? null))
+    .map(([k]) => k);
+}
+
+function listPlugins(disabled: string[]) {
+  // Same roots + precedence as the extension manager: global, then the
+  // daemon cwd's project dir (a project plugin shadows a global one).
+  const roots: [string, string][] = [[join(synapsBase(), "plugins"), "global"], [join(daemonCwd(), ".synaps", "plugins"), "project"]];
+  const found = new Map<string, any>();
+  for (const [dir, scope] of roots) {
+    let names: string[] = [];
+    try { names = readdirSync(dir); } catch { continue; }
+    for (const name of names) {
+      if (/\.(backup|update-backup|bak|disabled|old|orig)$|\.backup\./i.test(name)) continue;
+      let man: any = null;
+      try { man = JSON.parse(readFileSync(join(dir, name, ".synaps-plugin", "plugin.json"), "utf8")); } catch { continue; }
+      found.set(name, {
+        name, scope,
+        description: typeof man?.description === "string" ? man.description.slice(0, 200) : "",
+        version: typeof man?.version === "string" ? man.version.slice(0, 32) : null,
+        enabled: !disabled.includes(name),
+        self: name === SELF_PLUGIN,
+      });
+    }
+  }
+  return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Provider STATUS only: names and kinds. No key, token or URL ever leaves. */
+function listProviders(cfg: Map<string, string>) {
+  const out: { name: string; kind: string; source: string; note?: string }[] = [];
+  const seen = new Set<string>();
+  for (const k of cfg.keys()) {
+    const m = /^provider\.([\w-]+)(?:\.(\w+))?$/.exec(k);
+    if (!m || seen.has(m[1])) continue;
+    seen.add(m[1]);
+    out.push({ name: m[1], kind: m[2] === "url" ? "endpoint" : "API key", source: "config" });
+  }
+  const base = synapsBase(), prof = hostDaemon()?.profile;
+  const authPath = prof && existsSync(join(base, prof, "auth.json")) ? join(base, prof, "auth.json") : join(base, "auth.json");
+  try {
+    const auth = JSON.parse(readFileSync(authPath, "utf8"));
+    for (const [name, v] of Object.entries<any>(auth ?? {})) {
+      if (!v || typeof v !== "object") continue;
+      const oauth = v.type === "oauth";
+      let note: string | undefined;
+      if (oauth && typeof v.expires === "number") note = v.expires > Date.now() ? "token valid" : "token refreshes on next use";
+      out.push({ name, kind: oauth ? "OAuth sign-in" : v.type === "api" || v.type === "api_key" ? "API key" : "credential", source: "login", note });
+    }
+  } catch {}
+  return out;
+}
+
+function idleExitFlag(): number | null {
+  try {
+    const argv = readFileSync(`/proc/${process.ppid}/cmdline`, "utf8").split("\0");
+    const i = argv.indexOf("--idle-exit");
+    return i >= 0 && /^\d+$/.test(argv[i + 1] ?? "") ? Number(argv[i + 1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function configSnapshot() {
+  const { profile, read, write } = configPaths();
+  const cfg = readConfig();
+  const disabled = (cfg.get("disabled_plugins") ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+  const d = hostDaemon();
+  const exe = d && (d as any).exe ? String((d as any).exe).split("/").pop() : "synaps";
+  const tilde = (p: string) => p.replace(homedir(), "~");
+  return {
+    profile,
+    path: tilde(read),
+    writePath: tilde(write),
+    writable: !(profile && !existsSync(write)) && flock() !== null,
+    values: exposedValues(cfg),
+    applies: Object.fromEntries(Object.entries(CONFIG_KEYS).map(([k, v]) => [k, v.applies])),
+    pending: pendingReload(cfg),
+    reloadCmd: `${exe} daemon${profile ? ` --profile ${profile}` : ""} reload`,
+    idleExitRunning: idleExitFlag(),
+    plugins: listPlugins(disabled),
+    providers: listProviders(cfg),
+  };
+}
+
+async function handleConfigPost(req: Request): Promise<Response> {
+  if (!originOk(req)) return Response.json({ ok: false, error: "bad origin" }, { status: 403 });
+  if (!(req.headers.get("content-type") || "").startsWith("application/json")) return Response.json({ ok: false, error: "expected JSON" }, { status: 415 });
+  const text = await req.text();
+  if (text.length > 16 * 1024) return Response.json({ ok: false, error: "too large" }, { status: 413 });
+  let body: any;
+  try { body = JSON.parse(text); } catch { return Response.json({ ok: false, error: "invalid JSON" }, { status: 400 }); }
+  const key = body?.key;
+  const def = typeof key === "string" && Object.hasOwn(CONFIG_KEYS, key) ? CONFIG_KEYS[key] : null;
+  if (!def) return Response.json({ ok: false, error: `'${String(key)}' is not editable from the web` }, { status: 400 });
+  let value: string | null = body.value === null ? null : typeof body.value === "string" ? body.value.trim() : undefined as any;
+  if (value === undefined) return Response.json({ ok: false, error: "value must be a string or null" }, { status: 400 });
+  if (value !== null && key !== "disabled_plugins" && key !== "favorite_models" && !def.ok(value)) {
+    return Response.json({ ok: false, error: `invalid value for ${key}` }, { status: 400 });
+  }
+  if (value !== null && (key === "disabled_plugins" || key === "favorite_models")) {
+    if (!def.ok(value)) return Response.json({ ok: false, error: `invalid value for ${key}` }, { status: 400 });
+    const xs = [...new Set(value.split(",").map((x) => x.trim()).filter(Boolean))];
+    if (key === "disabled_plugins" && xs.includes(SELF_PLUGIN)) {
+      return Response.json({ ok: false, error: "synaps-dash can't disable itself from the browser — the next reload would take this page down. Use the TUI." }, { status: 400 });
+    }
+    value = xs.length ? xs.join(", ") : null;
+  }
+  try {
+    await writeConfigKey(key, value);
+  } catch (e: any) {
+    return Response.json({ ok: false, error: String(e?.message ?? e) }, { status: 409 });
+  }
+  log(`config: ${key} ${value === null ? "unset" : `= ${value}`} (${configPaths().write})`);
+  return Response.json({ ok: true, ...configSnapshot() });
 }
 
 // ── HTTP + WebSocket server ───────────────────────────────────────────────────
@@ -392,24 +671,16 @@ async function startServer() {
           return ok ? undefined : new Response("upgrade failed\n", { status: 400 });
         }
         if (url.pathname === "/api/models") {
-          // Favorites + default model from the Synaps config of OUR daemon's
-          // profile. Reads ONLY `model` and `favorite_models` — the config also
-          // holds provider keys, which never leave this process.
-          const d = hostDaemon();
-          const base = process.env.SYNAPS_BASE_DIR || join(homedir(), ".synaps-cli");
-          const files = d?.profile ? [join(base, d.profile, "config"), join(base, "config")] : [join(base, "config")];
-          let model: string | null = null, favorites: string[] = [];
-          for (const f of files) {
-            let text = "";
-            try { text = readFileSync(f, "utf8"); } catch { continue; }
-            for (const line of text.split("\n")) {
-              const m = /^\s*(model|favorite_models)\s*=\s*(.*?)\s*$/.exec(line);
-              if (!m) continue;
-              if (m[1] === "model" && !model) model = m[2];
-              if (m[1] === "favorite_models" && !favorites.length) favorites = m[2].split(",").map((x) => x.trim()).filter((x) => /^[\w.-]+\/[\w.:-]+$/.test(x));
-            }
-          }
-          return Response.json({ model, favorites });
+          // Favorites + default model. Reads ONLY `model` and `favorite_models`
+          // — the config also holds provider keys, which never leave this process.
+          const cfg = readConfig();
+          const favorites = (cfg.get("favorite_models") ?? "").split(",").map((x) => x.trim()).filter((x) => MODEL_RE.test(x));
+          return Response.json({ model: cfg.get("model") ?? null, favorites });
+        }
+        if (url.pathname === "/api/config") {
+          if (req.method === "GET") return Response.json(configSnapshot());
+          if (req.method === "POST") return handleConfigPost(req);
+          return new Response("method not allowed\n", { status: 405 });
         }
         if (url.pathname === "/api/info") {
           try {
@@ -518,6 +789,7 @@ async function startServer() {
     log(`not serving: ${e}`);
     return;
   }
+  bootConfig = readConfig();
   log(`serving on http://${HOST}:${PORT} → ${host.socket} (profile ${host.profile ?? "default"})`);
   void mxcLoop();
   writeUrlFile(host.profile);
