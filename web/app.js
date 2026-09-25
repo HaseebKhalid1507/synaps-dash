@@ -499,13 +499,13 @@ function appendThinking(text) {
 // backlog/REVEAL_LAG_MS worth each frame: ~3 chars EVERY frame, trailing the
 // wire by ~140ms, catching up faster after a burst. When a block ends, the rest
 // drains within a few frames. Replay and reduced-motion render instantly.
-// Default 300ms: long enough to glide over the model's own mid-sentence pauses
+// Default 256ms: long enough to glide over the model's own mid-sentence pauses
 // (170–340ms at the source). Compare live with /?lag=140 (remembered).
 const REVEAL_LAG_MS = (() => {
   const q = Number(new URLSearchParams(location.search).get("lag"));
   if (q >= 0 && q <= 2000 && new URLSearchParams(location.search).has("lag")) localStorage.setItem("sd.revealLag", String(q));
   const v = Number(localStorage.getItem("sd.revealLag"));
-  return Number.isFinite(v) && localStorage.getItem("sd.revealLag") !== null ? v : 300;
+  return Number.isFinite(v) && localStorage.getItem("sd.revealLag") !== null ? v : 256;
 })();
 const typers = new Set();
 let typerRaf = 0;
