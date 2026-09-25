@@ -51,7 +51,7 @@ function toolIcon(name = "") {
 const S = {
   ws: null, welcome: null, sessions: [], past: [],
   sid: null, me: null, owner: null, clients: new Map(),
-  streaming: false, replaying: false,
+  streaming: false, compacting: false, replaying: false,
   wantSid: null, wantMode: "mirror", wantCreate: false, wantContinue: null, intentionalClose: false, retry: 0,
   cur: null, localSubmit: null, steers: [], // steer bubbles + their delivery state
   qid: 1, queries: new Map(), prompt: null, model: "",
@@ -85,6 +85,102 @@ function anim(el, frames, opts = {}) {
   if (!el || !el.animate || !motion()) return null;
   return el.animate(frames, { duration: 220, easing: EASE.out, ...opts });
 }
+
+// ── ambient glow: drifts while the agent works, settles when it's idle ────────
+// Not a CSS keyframe loop (that can only snap on/off). A phase advances at a
+// SPEED v ∈ [0,1]; v follows a smootherstep ramp (zero acceleration at both
+// ends → starts slow, picks up through the middle, eases into cruise; the same
+// shape in reverse when idle). Displacement also scales with v, so as it slows
+// the blobs drift home to exactly the static pose. rAF runs only while moving.
+const Glow = (() => {
+  const a = $("glow-a"), b = $("glow-b");
+  const UP_MS = 1800, DOWN_MS = 2600, RATE = 1.3; // RATE: phase rad/s at full speed
+  const ease = (x) => x * x * x * (x * (x * 6 - 15) + 10); // smootherstep
+  let on = false, from = 0, to = 0, t0 = 0, dur = UP_MS, v = 0, ph = 0, last = 0, raf = 0, stamp = 0;
+  function paint() {
+    // Two incommensurate Lissajous paths so the blobs never sync up.
+    a.style.transform = `translate3d(${(Math.sin(ph * 0.71) * 6 * v).toFixed(3)}vw, ${(Math.cos(ph * 0.53) * 5 * v).toFixed(3)}vh, 0) scale(${(1 + 0.1 * v).toFixed(4)})`;
+    b.style.transform = `translate3d(${(Math.cos(ph * 0.47 + 1) * 7 * v).toFixed(3)}vw, ${(Math.sin(ph * 0.61 + 2) * 6 * v).toFixed(3)}vh, 0) scale(${(1 + 0.12 * v).toFixed(4)})`;
+    a.style.opacity = b.style.opacity = (0.815 + 0.185 * v).toFixed(4); // brighter while working
+  }
+  function rest() {
+    cancelAnimationFrame(raf);
+    raf = 0; last = 0; v = 0; from = to = 0;
+    a.style.transform = b.style.transform = a.style.opacity = b.style.opacity = "";
+  }
+  function frame(now) {
+    const dt = Math.min(0.05, (now - (last || now)) / 1000); // clamp: no jump after a hidden tab
+    last = now;
+    const k = Math.min(1, (now - t0) / dur);
+    v = from + (to - from) * ease(k);
+    stamp = now;
+    ph += dt * v * RATE;
+    paint();
+    if (k >= 1 && to === 0) return rest();
+    raf = requestAnimationFrame(frame);
+  }
+  function set(streaming) {
+    if (!motion() || !PREFS.glow) { on = false; if (raf || v) rest(); return; } // reduced motion / glow off: static
+    const want = !!streaming;
+    if (want === on) return;
+    on = want;
+    // Ramp from the CURRENT speed, so a turn that ends mid-ramp turns around
+    // smoothly; shorter distance → proportionally shorter ramp.
+    from = v; to = on ? 1 : 0; t0 = performance.now();
+    dur = Math.max(400, (on ? UP_MS : DOWN_MS) * Math.abs(to - from));
+    if (!raf) { last = 0; raf = requestAnimationFrame(frame); }
+  }
+  // stamp: the rAF time v was computed at (tests pair samples with it, not with
+  // their own frame time — callbacks in one frame see the previous frame's v).
+  return { set, get speed() { return v; }, get active() { return !!raf; }, get stamp() { return stamp; } };
+})();
+window.__glow = Glow; // test hook
+
+// ── run state (header) — mirrors the TUI header's status span ─────────────────
+//   not connected → ⠋ connecting…   compacting → ⠋ compacting…
+//   streaming     → ● streaming (pulsing)   idle → ○ ready
+// Same glyphs as the TUI (SPINNER_FRAMES), same cadence (a frame every 3 ticks
+// × 16ms = 48ms). render() is idempotent: it only touches the DOM on a change.
+const RunState = (() => {
+  const el = $("run-state"), glyph = el.querySelector(".rs-glyph"), text = el.querySelector(".rs-text");
+  const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const VIEW = {
+    connecting: { glyph: null, text: "connecting…", cls: "busy" },
+    compacting: { glyph: null, text: "compacting…", cls: "busy" },
+    streaming: { glyph: "●", text: "streaming", cls: "streaming" },
+    ready: { glyph: "○", text: "ready", cls: "ready" },
+  };
+  let state = null, spin = 0, fi = 0;
+  function spinner(on) {
+    if (on && !spin) {
+      fi = 0; glyph.textContent = FRAMES[0];
+      if (motion()) spin = setInterval(() => { fi = (fi + 1) % FRAMES.length; glyph.textContent = FRAMES[fi]; }, 48);
+    } else if (!on && spin) { clearInterval(spin); spin = 0; }
+  }
+  function current() {
+    if (S.ws?.readyState !== WebSocket.OPEN) return "connecting";
+    if (!S.sid) return null; // connected, no session → nothing to report
+    if (S.compacting) return "compacting";
+    return S.streaming ? "streaming" : "ready";
+  }
+  function render() {
+    const next = current();
+    if (next === state) return;
+    const prev = state;
+    state = next;
+    el.classList.toggle("hidden", !next);
+    if (!next) { spinner(false); return; }
+    const v = VIEW[next];
+    el.classList.remove("busy", "streaming", "ready");
+    el.classList.add(v.cls);
+    el.dataset.state = next;
+    text.textContent = v.text;
+    spinner(v.glyph === null);
+    if (v.glyph !== null) glyph.textContent = v.glyph;
+    if (prev) anim(el, [{ opacity: 0.35, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 240 });
+  }
+  return { render, get state() { return state; } };
+})();
 function slideOpen(body) {
   const hgt = body.scrollHeight;
   return anim(body, [{ height: "0px", opacity: 0, overflow: "hidden" }, { height: `${hgt}px`, opacity: 1, overflow: "hidden" }], { duration: 260 });
@@ -720,7 +816,7 @@ function renderTail(tail, cutAfterLastUser = false) {
 }
 
 // ── chrome ────────────────────────────────────────────────────────────────────
-function setConn(state, text) { $("conn").className = state; $("conn-text").textContent = text; }
+function setConn(state, text) { $("conn").className = state; $("conn-text").textContent = text; RunState.render(); }
 const isOwner = () => S.me != null && S.owner === S.me;
 function renderPresence() {
   const box = $("presence");
@@ -749,6 +845,8 @@ function renderPresence() {
 }
 function renderComposer() {
   window.__settings?.rerender();
+  Glow.set(S.streaming); // idempotent — only acts when streaming flips
+  RunState.render();
   const own = isOwner();
   $("watchbar").classList.toggle("hidden", own || !S.sid);
   if (!own && S.sid) $("watch-text").textContent = S.owner != null ? `Watching — ${who(S.owner)} is driving` : "Watching — nobody owns input";
@@ -767,32 +865,39 @@ function ago(iso) {
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
 }
-// The rail lists LIVE sessions (in the daemon now) and, below them, RECENT
-// sessions that live only on disk. Clicking a live one attaches; clicking a
-// recent one resumes it (attach:create + continue_session) and it becomes live.
+// The rail lists LIVE sessions (someone attached now, clients>0) and, below
+// them, RECENT sessions nobody's on: in-daemon-but-detached (0 clients — whether
+// lifecycle=parked or a journal-less session the daemon won't park) plus
+// sessions that live only on disk. Clicking an in-daemon one attaches (it's in
+// memory); clicking a disk-only one resumes it (attach:create + continue).
 function railItems() {
-  const live = [...S.sessions].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-  // The attached session is live even if the daemon's session_list hasn't caught
-  // up yet (just-resumed / just-created) — synthesize it so it never flickers in
-  // Recent for a poll cycle.
-  if (S.sid && !live.some((s) => s.id === S.sid)) {
-    live.unshift({ id: S.sid, name: null, title: S.title, model: S.model, clients: 1, created_at: new Date().toISOString() });
+  const daemon = S.sessions;
+  const daemonIds = new Set(daemon.map((s) => s.id));
+  let live = daemon.filter((s) => s.clients > 0 && s.id !== S.sid);
+  // The attached session is always live, even before the daemon's session_list
+  // catches up (just-resumed / just-created) — synthesize it so it never
+  // flickers into Recent for a poll cycle.
+  if (S.sid) {
+    const cur = daemon.find((s) => s.id === S.sid);
+    live.unshift(cur ? { ...cur } : { id: S.sid, name: null, title: S.title, model: S.model, clients: 1, created_at: new Date().toISOString() });
   }
-  const liveIds = new Set(live.map((s) => s.id));
-  const past = S.past
-    .filter((s) => !liveIds.has(s.id))
-    .sort((a, b) => ((a.updated_at || a.created_at) < (b.updated_at || b.created_at) ? 1 : -1));
-  return { live, past };
+  live.sort((a, b) => (a.id === S.sid ? -1 : b.id === S.sid ? 1 : a.created_at < b.created_at ? 1 : -1));
+  const detached = daemon.filter((s) => s.clients === 0 && s.id !== S.sid).map((s) => ({ ...s, parked: true }));
+  const disk = S.past.filter((s) => !daemonIds.has(s.id) && s.id !== S.sid);
+  const recent = [...detached, ...disk].sort((a, b) => ((a.updated_at || a.created_at) < (b.updated_at || b.created_at) ? 1 : -1));
+  return { live, recent };
 }
-function fillRow(li, s, past) {
+function fillRow(li, s, isRecent) {
   const title = s.name || (s.id === S.sid && S.title) || s.title || s.id;
   if (li.firstChild.textContent !== title) li.firstChild.textContent = title;
   const dot = li.querySelector(".s-dot");
-  dot.classList.toggle("live", !past && s.clients > 0);
-  dot.classList.toggle("rest", past);
+  dot.classList.toggle("live", !isRecent && s.clients > 0);
+  dot.classList.toggle("rest", isRecent);
   const model = (s.model || "").replace(/^.*\//, "");
   const when = ago(s.updated_at || s.created_at);
-  const meta = past ? `${model} · ${s.message_count || 0} msg · ${when}` : `${model} · ${s.clients} · ${when}`;
+  const meta = !isRecent ? `${model} · ${s.clients} · ${when}`
+    : s.parked ? `${model} · idle · ${when}`
+    : `${model} · ${s.message_count || 0} msg · ${when}`;
   const txt = li.querySelector(".s-txt");
   if (txt.textContent !== meta) txt.textContent = meta;
 }
@@ -814,8 +919,9 @@ function reconcileList(ul, list, past) {
       li.innerHTML = '<div class="s-title"></div><div class="s-meta"><span class="s-dot"></span><span class="s-txt"></span></div>';
       li.onclick = () => {
         if (s.id === S.sid) return;
-        if (past) switchTo(s.id, "mirror", { continue: s.id });
-        else switchTo(s.id, "mirror");
+        // In the daemon (live or detached-in-memory) → attach; disk-only → resume.
+        if (S.sessions.some((x) => x.id === s.id)) switchTo(s.id, "mirror");
+        else switchTo(s.id, "mirror", { continue: s.id });
         if (innerWidth < 860) $("app").classList.remove("rail-open");
       };
       if (ul._ready) anim(li, [{ opacity: 0, transform: "translateX(-10px)" }, { opacity: 1, transform: "none" }], { duration: 260 });
@@ -832,12 +938,12 @@ function reconcileList(ul, list, past) {
   else ind.style.opacity = "0";
 }
 function renderSessions() {
-  const { live, past } = railItems();
+  const { live, recent } = railItems();
   reconcileList($("sessions"), live, false);
   $("live-empty").classList.toggle("hidden", live.length > 0);
   const pastWrap = $("past-wrap");
-  pastWrap.classList.toggle("hidden", past.length === 0);
-  if (past.length) reconcileList($("past-sessions"), past, true);
+  pastWrap.classList.toggle("hidden", recent.length === 0);
+  if (recent.length) reconcileList($("past-sessions"), recent, true);
 }
 function toast(msg, cls = "", ms = 3600) {
   const t = h("div", `toast ${cls}`, msg);
@@ -877,7 +983,7 @@ function connect() {
   ws.onopen = () => { S.retry = 0; };
   ws.onmessage = (m) => onFrame(JSON.parse(m.data));
   ws.onclose = () => {
-    S.me = null; S.owner = null; S.clients.clear(); S.streaming = false;
+    S.me = null; S.owner = null; S.clients.clear(); S.streaming = false; S.compacting = false;
     finishAsst(); renderPresence(); renderComposer();
     if (S.intentionalClose) { S.intentionalClose = false; connect(); return; }
     setConn("down", "reconnecting…");
@@ -965,6 +1071,7 @@ function onAttached(a) {
   for (const env of replay) onEvent(env.event, env.ts);
   S.replaying = false;
   S.streaming = !!a.streaming;
+  S.compacting = false;
   if (S.streaming && !S.cur) newAsst();
   for (const p of a.pending_prompts ?? []) showPrompt(p);
   renderPresence(); renderComposer(); renderSessions();
@@ -1057,9 +1164,9 @@ function onEvent(e, ts) {
     case "attach_refused": toast(`Attach refused: ${e.message}`, "err", 6000); return;
     case "query_result": { const cb = S.queries.get(e.id); if (cb) { S.queries.delete(e.id); cb(e.value); } return; }
     case "reloading": toast("Daemon reloading — reconnecting…"); return;
-    case "compaction_started": return addSys("compacting…");
-    case "compaction_applied": return addSys(`compacted ${e.msg_count} messages`);
-    case "compaction_failed": return addSys(`compaction failed: ${e.message}`, "err");
+    case "compaction_started": S.compacting = true; RunState.render(); return addSys("compacting…");
+    case "compaction_applied": S.compacting = false; RunState.render(); return addSys(`compacted ${e.msg_count} messages`);
+    case "compaction_failed": S.compacting = false; RunState.render(); return addSys(`compaction failed: ${e.message}`, "err");
     case "setting_changed": {
       const ap = e.applied || {};
       if (ap.view) {
@@ -1200,6 +1307,7 @@ function applyPrefs() {
   REVEAL_LAG_MS = PREFS.lag;
   $("input").placeholder = $("input").placeholder; // re-evaluated by renderComposer
   applyTheme();
+  Glow.set(S.streaming); // motion/glow prefs may have just changed
 }
 function setPref(k, v) { PREFS[k] = v; savePrefs(); applyPrefs(); if (k === "autoscroll" && v) pin(); }
 
