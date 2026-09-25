@@ -52,7 +52,7 @@ const S = {
   cur: null, localSubmit: null, steers: [], // steer bubbles + their delivery state
   qid: 1, queries: new Map(), prompt: null, model: "",
   turnTools: new Map(), // tool_id → card, across split segments of the current turn
-  atBottom: true,
+  pinned: true, // follow the bottom until the user deliberately scrolls up
 };
 const T = $("thread");
 const SC = $("scroller");
@@ -202,22 +202,64 @@ function md(src) {
   return out.join("");
 }
 
-// ── scroll follow ─────────────────────────────────────────────────────────────
-SC.addEventListener("scroll", () => {
-  S.atBottom = SC.scrollHeight - SC.scrollTop - SC.clientHeight < 90;
-  if (S.atBottom) $("jump").classList.remove("show");
+// ── scroll: pinned by intent, not by position ─────────────────────────────────
+// The transcript stays glued to the bottom through ANY growth (streaming, rows
+// expanding, steer flights) until the user DELIBERATELY scrolls up: wheel up,
+// touch drag, PageUp/↑/Home, or dragging the scrollbar. Scrolls we make never
+// unpin. Scrolling back to the very bottom (or the pill, or sending) re-pins.
+const atEnd = () => SC.scrollHeight - SC.scrollTop - SC.clientHeight <= 2;
+const stick = () => { SC.scrollTop = SC.scrollHeight; };
+let intentAt = 0, dragging = false, touchY = null, noRepinUntil = 0;
+const intent = () => performance.now() - intentAt < 400 || dragging;
+function setPinned() { S.pinned = true; $("jump").classList.remove("show"); }
+function pin() { setPinned(); stick(); } // explicit: attach, send
+function unpin() { if (S.pinned) S.pinned = false; }
+// An upward gesture wins for a moment: a stale scroll event from our own
+// stick-to-bottom (fired a frame late) must not re-pin and yank the view back.
+function unpinGesture() { unpin(); noRepinUntil = performance.now() + 700; }
+SC.addEventListener("wheel", (e) => { intentAt = performance.now(); if (e.deltaY < 0) unpinGesture(); }, { passive: true });
+SC.addEventListener("touchstart", (e) => { touchY = e.touches[0]?.clientY ?? null; intentAt = performance.now(); }, { passive: true });
+SC.addEventListener("touchmove", (e) => {
+  const y = e.touches[0]?.clientY;
+  if (touchY != null && y != null && y - touchY > 6) unpinGesture(); // finger down = content up
+  intentAt = performance.now();
 }, { passive: true });
+SC.addEventListener("pointerdown", (e) => { if (e.target === SC) dragging = true; }); // scrollbar
+addEventListener("pointerup", () => { dragging = false; });
+// Navigation keys scroll the transcript whenever you're not typing.
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest?.("input, textarea, [contenteditable]") || e.metaKey || e.ctrlKey || e.altKey) return;
+  const page = SC.clientHeight * 0.85;
+  const moves = { PageUp: -page, PageDown: page, ArrowUp: -64, ArrowDown: 64, Home: -SC.scrollHeight, End: SC.scrollHeight };
+  if (!(e.key in moves)) return;
+  e.preventDefault();
+  intentAt = performance.now();
+  if (moves[e.key] < 0) unpinGesture();
+  if (e.key === "End") { pin(); return; }
+  SC.scrollBy({ top: moves[e.key], behavior: Math.abs(moves[e.key]) > 100 ? "smooth" : "auto" });
+});
+SC.addEventListener("scroll", () => {
+  if (!intent()) return; // our own scrolls
+  if (!atEnd()) unpin();
+  else if (performance.now() > noRepinUntil) setPinned(); // back at the bottom by hand
+}, { passive: true });
+// Growth anywhere in the thread (or a viewport resize) keeps a pinned view glued.
+new ResizeObserver(() => {
+  if (S.pinned) stick();
+  else if (S.streaming) $("jump").classList.add("show");
+}).observe(T);
+new ResizeObserver(() => { if (S.pinned) stick(); }).observe(SC);
 let followQueued = false;
 function follow() {
   if (followQueued) return;
   followQueued = true;
   requestAnimationFrame(() => {
     followQueued = false;
-    if (S.atBottom) SC.scrollTop = SC.scrollHeight;
+    if (S.pinned) stick();
     else if (S.streaming) $("jump").classList.add("show");
   });
 }
-$("jump").onclick = () => { SC.scrollTo({ top: SC.scrollHeight, behavior: "smooth" }); $("jump").classList.remove("show"); };
+$("jump").onclick = () => { S.pinned = true; $("jump").classList.remove("show"); SC.scrollTo({ top: SC.scrollHeight, behavior: "smooth" }); };
 // Pending steers live in a tray that is always the LAST child of the thread;
 // normal output inserts above it. A steer leaves the tray only when an event
 // tells us where it actually entered the conversation.
@@ -813,7 +855,7 @@ function onAttached(a) {
   if (S.streaming && !S.cur) newAsst();
   for (const p of a.pending_prompts ?? []) showPrompt(p);
   renderPresence(); renderComposer(); renderSessions();
-  requestAnimationFrame(() => { SC.scrollTop = SC.scrollHeight; S.atBottom = true; });
+  requestAnimationFrame(pin);
   if (isOwner()) $("input").focus();
 }
 
@@ -963,7 +1005,7 @@ function doSend() {
   T.querySelector(".empty")?.remove();
   if (S.streaming) { addSteer(text, "you", true, "sending"); cmd({ cmd: "steer", text }); }
   else { finishAsst(); addUser(text, "you"); S.localSubmit = text; cmd({ cmd: "submit", text, attachments: [] }); }
-  S.atBottom = true; follow();
+  pin();
   input.value = ""; autosize(); renderComposer();
 }
 function autosize() {
