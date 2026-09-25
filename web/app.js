@@ -290,7 +290,7 @@ function groupFor(c) {
   const el = h("details", "activity single");
   el.innerHTML = `<summary class="act-head"><span class="act-ico">${svg("layers")}</span><span class="act-lbl"></span><span class="act-st"></span>${svg("chev", "i chev")}</summary><div class="act-body"></div>`;
   add(el, c.body);
-  c.group = { el, body: el.querySelector(".act-body"), lbl: el.querySelector(".act-lbl"), st: el.querySelector(".act-st"), items: [] };
+  c.group = { el, body: el.querySelector(".act-body"), lbl: el.querySelector(".act-lbl"), st: el.querySelector(".act-st"), items: [], start: S.replaying ? 0 : performance.now() };
   return c.group;
 }
 function closeGroup(c) { if (c?.group) { updateGroup(c.group); c.group = null; } }
@@ -320,7 +320,9 @@ function updateGroup(g) {
     g.el.classList.add("live");
   } else {
     g.lbl.textContent = parts.join(" · ");
-    g.st.innerHTML = errs ? `${svg("x")}<span>${errs} failed</span>` : svg("check");
+    const secs = g.start ? (performance.now() - g.start) / 1000 : 0;
+    const took = g.start ? (secs < 10 ? `${secs.toFixed(1)}s` : `${Math.round(secs)}s`) : "";
+    g.st.innerHTML = errs ? `<span>${errs} failed</span>${svg("x")}` : `<span>${took}</span>${svg("check")}`;
     g.el.classList.toggle("has-err", errs > 0);
     g.el.classList.remove("live");
   }
@@ -330,7 +332,8 @@ function closeThinking(c) {
   if (!c || !c.think || !c.think.classList.contains("active")) return;
   c.think.classList.remove("active");
   const secs = c.thinkStart ? Math.max(1, Math.round((performance.now() - c.thinkStart) / 1000)) : 0;
-  c.think.querySelector(".lbl").textContent = secs && !S.replaying ? `Thought for ${secs}s` : "Thoughts";
+  c.think.querySelector(".lbl").textContent = "Thought";
+  c.think.querySelector(".think-st").textContent = secs && !S.replaying ? `${secs}s` : "";
   if (c.think._item) { c.think._item.secs = S.replaying ? 0 : secs; updateGroup(c.think._group); }
 }
 function dropCaret(c) { c?.body.querySelectorAll(".caret").forEach((x) => x.remove()); }
@@ -367,7 +370,7 @@ function appendThinking(text) {
   const c = asst();
   if (!c.think || c.last !== "think") {
     const d = h("details", "think active");
-    d.innerHTML = `<summary>${svg("brain")}<span class="lbl">Thinking…</span>${svg("chev", "i chev")}</summary><div class="think-body"></div>`;
+    d.innerHTML = `<summary>${svg("brain")}<span class="lbl">Thinking…</span><span class="think-sum"></span><span class="think-st"></span>${svg("chev", "i chev")}</summary><div class="think-body"></div>`;
     c.think = d; c.thinkRaw = ""; c.thinkStart = performance.now();
     const g = groupFor(c);
     add(d, g.body);
@@ -379,6 +382,7 @@ function appendThinking(text) {
   }
   c.thinkRaw += text;
   c.think.querySelector(".think-body").textContent = c.thinkRaw;
+  c.think.querySelector(".think-sum").textContent = c.thinkRaw.trim().split("\n")[0].slice(0, 160);
   c.last = "think";
 }
 
@@ -411,26 +415,55 @@ function appendText(text) {
   markDirty(c.text);
 }
 
+const PRIMARY_KEYS = ["command", "cmd", "path", "file_path", "pattern", "query", "url", "upload_id", "task", "agent", "name"];
+function parseInput(input) {
+  if (typeof input === "string") { try { return JSON.parse(input); } catch { return input; } }
+  return input;
+}
+const primaryKey = (o) => (o && typeof o === "object" ? PRIMARY_KEYS.find((k) => typeof o[k] === "string") : undefined);
+// Split a shell command at top-level `;`, `&&`, `||` (outside quotes and
+// $(…)/(…) nesting) — display only, the operator stays at the end of its line.
+function shellSegments(cmd) {
+  const out = []; let cur = "", q = null, depth = 0;
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i], two = cmd.slice(i, i + 2);
+    if (q) { cur += ch; if (ch === "\\" && q === '"') { cur += cmd[++i] ?? ""; } else if (ch === q) q = null; continue; }
+    if (ch === "'" || ch === '"') { q = ch; cur += ch; continue; }
+    if (ch === "(") depth++;
+    if (ch === ")") depth = Math.max(0, depth - 1);
+    if (depth === 0 && (two === "&&" || two === "||")) { out.push((cur.trim() + " " + two).trim()); cur = ""; i++; continue; }
+    if (depth === 0 && ch === ";") { out.push(cur.trim() + ";"); cur = ""; continue; }
+    if (depth === 0 && ch === "\n") { if (cur.trim()) out.push(cur.trim()); cur = ""; continue; }
+    cur += ch;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out.length ? out : [cmd];
+}
 function summarize(input) {
+  input = parseInput(input);
   if (input == null) return "";
-  if (typeof input === "string") { try { input = JSON.parse(input); } catch { return input; } }
   if (typeof input !== "object") return String(input);
-  const k = input.command ?? input.cmd ?? input.path ?? input.file_path ?? input.pattern ?? input.query ?? input.url ?? input.upload_id ?? input.task ?? input.agent ?? input.name;
-  return k !== undefined ? String(k) : JSON.stringify(input);
+  const k = primaryKey(input);
+  if (!k) return JSON.stringify(input);
+  if (k === "command" || k === "cmd") {
+    const segs = shellSegments(input[k]);
+    return segs.length > 1 ? `${segs[0].replace(/\s*(;|&&|\|\|)$/, "")}  +${segs.length - 1}` : segs[0];
+  }
+  return input[k];
 }
 function toolCard(id, name, input) {
   const c = asst();
   closeThinking(c);
   if (c.text) { c.text._live = false; markDirty(c.text); }
   const card = h("div", "tool");
-  card.innerHTML = `<button class="tool-head"><span class="tool-ico">${svg(toolIcon(name))}</span><span class="tool-name"></span><span class="tool-sum"></span><span class="tool-st"><span class="spinner"></span></span>${svg("chev", "i chev")}</button><div class="tool-body"><div class="tool-sec in"><div class="lbl">Input</div><pre></pre></div><div class="tool-sec out ${/bash|shell|exec/.test(name) ? "term" : ""} hidden"><div class="lbl">Output</div><pre></pre></div></div>`;
+  card.innerHTML = `<button class="tool-head"><span class="tool-ico">${svg(toolIcon(name))}</span><span class="tool-name"></span><span class="tool-sum"></span><span class="tool-st"><span class="spinner"></span></span>${svg("chev", "i chev")}</button><div class="tool-body"><div class="tool-sec in"><div class="lbl">Input</div><div class="in-view"></div></div><div class="tool-sec out ${/bash|shell|exec/.test(name) ? "term" : ""} hidden"><div class="lbl">Output</div><pre></pre></div></div>`;
   card.querySelector(".tool-name").textContent = name || "tool";
   card.querySelector(".tool-head").onclick = () => card.classList.toggle("open");
   const g = groupFor(c);
   add(card, g.body);
   const t = { card, name, start: performance.now(), inRaw: "", outRaw: "", done: false,
     sum: card.querySelector(".tool-sum"), st: card.querySelector(".tool-st"),
-    inp: card.querySelector(".in pre"), out: card.querySelector(".out pre"), outSec: card.querySelector(".out") };
+    inp: card.querySelector(".in-view"), out: card.querySelector(".out pre"), outSec: card.querySelector(".out") };
   c.tools.set(id, t);
   S.turnTools.set(id, t);
   c.last = "tool";
@@ -440,9 +473,41 @@ function toolCard(id, name, input) {
   updateGroup(g);
   return t;
 }
+// Tool input as a readable view, not raw JSON: shell commands as `$` lines
+// (one per top-level statement, hanging indent on wrap), the primary field as a
+// block, short scalars as chips, long text / objects as labelled blocks.
 function setToolInput(t, input) {
   t.sum.textContent = summarize(input);
-  t.inp.textContent = typeof input === "string" ? input : JSON.stringify(input, null, 2);
+  const v = parseInput(input);
+  const box = t.inp;
+  box.innerHTML = "";
+  if (v == null || typeof v !== "object") { box.append(h("pre", "blk", String(v ?? ""))); updateGroup(t.group); return; }
+  const k = primaryKey(v);
+  if (k === "command" || k === "cmd") {
+    const pre = h("div", "cmd");
+    let cont = false;
+    for (const seg of shellSegments(v[k])) {
+      const line = h("div", `cmd-line${cont ? " cont" : ""}`);
+      line.append(h("span", "prompt", cont ? "" : "$"), document.createTextNode(seg));
+      pre.append(line);
+      cont = /(&&|\|\|)$/.test(seg);
+    }
+    box.append(pre);
+  } else if (k) {
+    box.append(h("div", "kv-key", k), h("pre", "blk", v[k]));
+  }
+  const chips = h("div", "chips");
+  for (const [key, val] of Object.entries(v)) {
+    if (key === k) continue;
+    if (val == null || (typeof val !== "object" && String(val).length <= 60 && !String(val).includes("\n"))) {
+      const c = h("span", "kchip");
+      c.append(h("span", "ck", key), h("span", "cv", String(val)));
+      chips.append(c);
+    } else {
+      box.append(h("div", "kv-key", key), h("pre", "blk", typeof val === "string" ? val : JSON.stringify(val, null, 2)));
+    }
+  }
+  if (chips.children.length) box.append(chips);
   updateGroup(t.group);
 }
 function setToolOutput(t, text) {
@@ -457,7 +522,7 @@ function toolDone(t, cls = "ok", label) {
   t.card.classList.add(cls);
   const ms = performance.now() - t.start;
   const dur = ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
-  t.st.innerHTML = `${svg(cls === "ok" ? "check" : "x")}<span>${label || (S.replaying ? "" : dur)}</span>`;
+  t.st.innerHTML = `<span>${label || (S.replaying ? "" : dur)}</span>${svg(cls === "ok" ? "check" : "x")}`;
   updateGroup(t.group);
 }
 
