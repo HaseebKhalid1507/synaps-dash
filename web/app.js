@@ -49,10 +49,10 @@ function toolIcon(name = "") {
 
 // ── state ─────────────────────────────────────────────────────────────────────
 const S = {
-  ws: null, welcome: null, sessions: [],
+  ws: null, welcome: null, sessions: [], past: [],
   sid: null, me: null, owner: null, clients: new Map(),
   streaming: false, replaying: false,
-  wantSid: null, wantMode: "mirror", wantCreate: false, intentionalClose: false, retry: 0,
+  wantSid: null, wantMode: "mirror", wantCreate: false, wantContinue: null, intentionalClose: false, retry: 0,
   cur: null, localSubmit: null, steers: [], // steer bubbles + their delivery state
   qid: 1, queries: new Map(), prompt: null, model: "",
   turnTools: new Map(), // tool_id → card, across split segments of the current turn
@@ -767,19 +767,44 @@ function ago(iso) {
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
 }
-function renderSessions() {
-  const ul = $("sessions");
+// The rail lists LIVE sessions (in the daemon now) and, below them, RECENT
+// sessions that live only on disk. Clicking a live one attaches; clicking a
+// recent one resumes it (attach:create + continue_session) and it becomes live.
+function railItems() {
+  const live = [...S.sessions].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  // The attached session is live even if the daemon's session_list hasn't caught
+  // up yet (just-resumed / just-created) — synthesize it so it never flickers in
+  // Recent for a poll cycle.
+  if (S.sid && !live.some((s) => s.id === S.sid)) {
+    live.unshift({ id: S.sid, name: null, title: S.title, model: S.model, clients: 1, created_at: new Date().toISOString() });
+  }
+  const liveIds = new Set(live.map((s) => s.id));
+  const past = S.past
+    .filter((s) => !liveIds.has(s.id))
+    .sort((a, b) => ((a.updated_at || a.created_at) < (b.updated_at || b.created_at) ? 1 : -1));
+  return { live, past };
+}
+function fillRow(li, s, past) {
+  const title = s.name || (s.id === S.sid && S.title) || s.title || s.id;
+  if (li.firstChild.textContent !== title) li.firstChild.textContent = title;
+  const dot = li.querySelector(".s-dot");
+  dot.classList.toggle("live", !past && s.clients > 0);
+  dot.classList.toggle("rest", past);
+  const model = (s.model || "").replace(/^.*\//, "");
+  const when = ago(s.updated_at || s.created_at);
+  const meta = past ? `${model} · ${s.message_count || 0} msg · ${when}` : `${model} · ${s.clients} · ${when}`;
+  const txt = li.querySelector(".s-txt");
+  if (txt.textContent !== meta) txt.textContent = meta;
+}
+function reconcileList(ul, list, past) {
   let ind = ul.querySelector(":scope > .rail-ind");
   if (!ind) { ind = h("div", "rail-ind"); ul.prepend(ind); }
-  ul.querySelector(":scope > .rail-empty")?.remove();
   const rows = new Map([...ul.querySelectorAll(":scope > li[data-id]")].map((li) => [li.dataset.id, li]));
-  const list = [...S.sessions].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
   for (const [id, li] of rows) if (!list.some((s) => s.id === id)) {
     const a = anim(li, [{ opacity: 1 }, { opacity: 0, transform: "translateX(-8px)" }], { duration: 160 });
     rows.delete(id);
     if (a) a.onfinish = () => li.remove(); else li.remove();
   }
-  if (!list.length) { ul.append(h("li", "rail-empty", "No sessions yet — start one here or in the TUI.")); ind.style.opacity = "0"; return; }
   let prev = ind;
   for (const s of list) {
     let li = rows.get(s.id);
@@ -787,16 +812,17 @@ function renderSessions() {
       li = h("li");
       li.dataset.id = s.id;
       li.innerHTML = '<div class="s-title"></div><div class="s-meta"><span class="s-dot"></span><span class="s-txt"></span></div>';
-      li.onclick = () => { if (s.id !== S.sid) switchTo(s.id, "mirror"); if (innerWidth < 860) $("app").classList.remove("rail-open"); };
+      li.onclick = () => {
+        if (s.id === S.sid) return;
+        if (past) switchTo(s.id, "mirror", { continue: s.id });
+        else switchTo(s.id, "mirror");
+        if (innerWidth < 860) $("app").classList.remove("rail-open");
+      };
       if (ul._ready) anim(li, [{ opacity: 0, transform: "translateX(-10px)" }, { opacity: 1, transform: "none" }], { duration: 260 });
     }
     li.classList.toggle("active", s.id === S.sid);
-    const title = s.name || (s.id === S.sid && S.title) || s.id;
-    if (li.firstChild.textContent !== title) li.firstChild.textContent = title;
-    li.querySelector(".s-dot").classList.toggle("live", s.clients > 0);
-    const meta = `${(s.model || "").replace(/^.*\//, "")} · ${s.clients} · ${ago(s.created_at)}`;
-    const txt = li.querySelector(".s-txt");
-    if (txt.textContent !== meta) txt.textContent = meta;
+    li.classList.toggle("rest", past);
+    fillRow(li, s, past);
     if (prev.nextSibling !== li) ul.insertBefore(li, prev.nextSibling);
     prev = li;
   }
@@ -804,6 +830,14 @@ function renderSessions() {
   const act = ul.querySelector(":scope > li.active");
   if (act) { ind.style.opacity = "1"; ind.style.transform = `translateY(${act.offsetTop}px)`; ind.style.height = `${act.offsetHeight}px`; }
   else ind.style.opacity = "0";
+}
+function renderSessions() {
+  const { live, past } = railItems();
+  reconcileList($("sessions"), live, false);
+  $("live-empty").classList.toggle("hidden", live.length > 0);
+  const pastWrap = $("past-wrap");
+  pastWrap.classList.toggle("hidden", past.length === 0);
+  if (past.length) reconcileList($("past-sessions"), past, true);
 }
 function toast(msg, cls = "", ms = 3600) {
   const t = h("div", `toast ${cls}`, msg);
@@ -850,9 +884,16 @@ function connect() {
     setTimeout(connect, Math.min(5000, 300 * 2 ** S.retry++));
   };
 }
+function loadPast() {
+  fetch("/api/sessions?limit=60").then((r) => r.json()).then((d) => { S.past = d.sessions || []; renderSessions(); }).catch(() => {});
+}
 function switchTo(sid, mode, create = false) {
   S.threadFade = anim(T, [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-6px)" }], { duration: 140, easing: EASE.move, fill: "forwards" });
-  S.wantSid = sid; S.wantMode = mode; S.wantCreate = create;
+  S.wantSid = sid; S.wantMode = mode;
+  // create can be `true` (blank new session) or `{ continue: <id> }` (resume a
+  // past session on disk into the daemon).
+  S.wantCreate = !!create;
+  S.wantContinue = create && typeof create === "object" ? create.continue : null;
   S.intentionalClose = true;
   S.ws?.close();
 }
@@ -875,7 +916,14 @@ function onWelcome(w) {
   setConn("up", `v${w.daemon_version}`);
   $("daemon-info").textContent = `${w.profile ?? "default"} · daemon ${w.daemon_version} · gen ${w.generation}`;
   renderSessions();
-  if (S.wantCreate) { S.wantCreate = false; send({ type: "attach", attach: "create", config: {}, mode: "mirror" }); return; }
+  loadPast();
+  if (S.wantCreate) {
+    S.wantCreate = false;
+    const config = S.wantContinue ? { continue_session: S.wantContinue } : {};
+    S.wantContinue = null;
+    send({ type: "attach", attach: "create", config, mode: "mirror" });
+    return;
+  }
   let target = S.wantSid;
   const fromHash = new URLSearchParams(location.hash.slice(1)).get("s");
   if (!target && fromHash && w.sessions.some((s) => s.id === fromHash)) target = fromHash;
@@ -920,6 +968,8 @@ function onAttached(a) {
   if (S.streaming && !S.cur) newAsst();
   for (const p of a.pending_prompts ?? []) showPrompt(p);
   renderPresence(); renderComposer(); renderSessions();
+  send({ type: "sessions" }); // refresh the live list so a just-resumed session moves out of Recent
+  loadPast();
   requestAnimationFrame(pin);
   if (isOwner()) $("input").focus();
 }
@@ -1753,4 +1803,5 @@ window.__settings = Settings;
 
 applyPrefs();
 setInterval(() => send({ type: "sessions" }), 5000);
+setInterval(loadPast, 15000);
 connect();

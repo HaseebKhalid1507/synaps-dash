@@ -17,8 +17,15 @@
           <svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>New session</span>
         </button>
       </div>
-      <div class="rail-label">Sessions</div>
-      <ul id="sessions"></ul>
+      <div class="rail-scroll">
+        <div class="rail-label">Live</div>
+        <ul id="sessions"></ul>
+        <div id="live-empty" class="rail-empty hidden">No live sessions — start one above, or open a recent one.</div>
+        <div id="past-wrap" class="hidden">
+          <div class="rail-label">Recent</div>
+          <ul id="past-sessions"></ul>
+        </div>
+      </div>
       <div class="rail-foot">
         <button id="open-settings" class="gear" title="Settings (Ctrl+,)" aria-label="Settings">
           <svg class="i" viewBox="0 0 24 24"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>

@@ -14,7 +14,7 @@
 //
 // stdout is reserved for framed JSON-RPC. Log to stderr only. Never console.log.
 
-import { readFileSync, readdirSync, readlinkSync, writeFileSync, statSync, existsSync, openSync, closeSync, renameSync, chmodSync } from "node:fs";
+import { readFileSync, readdirSync, readlinkSync, writeFileSync, statSync, existsSync, openSync, closeSync, readSync, renameSync, chmodSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -254,6 +254,59 @@ function synapsBase(): string {
   // for the live profiles).
   return process.env.SYNAPS_BASE_DIR || join(homedir(), ".synaps-cli");
 }
+function sessionsDir(): string {
+  const base = synapsBase();
+  const profile = hostDaemon()?.profile ?? null;
+  return profile ? join(base, profile, "sessions") : join(base, "sessions");
+}
+
+/**
+ * Recent sessions on disk, most-recent first — the same shape the TUI's
+ * `/sessions` builds: sort files by mtime, then read ONLY the top `limit`
+ * headers. A session file is `{...header fields..., "api_messages": [...]}`;
+ * the daemon writes every header key before `api_messages`, so we cut there
+ * and parse just the prefix instead of the whole (megabytes) file.
+ */
+function listSessions(limit: number): { id: string; title: string; name: string | null; model: string; created_at: string | null; updated_at: string | null; session_cost: number; message_count: number }[] {
+  const dir = sessionsDir();
+  let files: string[] = [];
+  try { files = readdirSync(dir).filter((f) => f.endsWith(".json")); } catch { return []; }
+  const withM = files
+    .map((f) => { try { return { f, m: statSync(join(dir, f)).mtimeMs }; } catch { return null; } })
+    .filter(Boolean) as { f: string; m: number }[];
+  withM.sort((a, b) => b.m - a.m);
+  const out: any[] = [];
+  for (const { f } of withM.slice(0, limit)) {
+    let fd: number | null = null;
+    try {
+      // Read a bounded prefix (headers are small; caps a pathological file).
+      fd = openSync(join(dir, f), "r");
+      const buf = Buffer.alloc(256 * 1024);
+      const n = readSync(fd, buf, 0, buf.length, 0);
+      const text = buf.subarray(0, n).toString("utf8");
+      const cut = text.indexOf('"api_messages"');
+      const head = (cut < 0 ? text : text.slice(0, cut).replace(/[,\s]*$/, "") + "}");
+      const h = JSON.parse(head);
+      if (typeof h.id !== "string") continue;
+      out.push({
+        id: h.id,
+        title: typeof h.title === "string" ? h.title.slice(0, 200) : "",
+        name: typeof h.name === "string" ? h.name : null,
+        model: typeof h.model === "string" ? h.model : "",
+        created_at: h.created_at ?? null,
+        updated_at: h.updated_at ?? null,
+        session_cost: typeof h.session_cost === "number" ? h.session_cost : 0,
+        message_count: typeof h.message_count === "number" ? h.message_count : 0,
+      });
+    } catch {
+      // partial write / not-yet-flushed header — skip, it'll show once saved
+    } finally {
+      if (fd !== null) closeSync(fd);
+    }
+  }
+  return out;
+}
+
 function configPaths() {
   const base = synapsBase();
   const profile = hostDaemon()?.profile ?? null;
@@ -681,6 +734,12 @@ async function startServer() {
           if (req.method === "GET") return Response.json(configSnapshot());
           if (req.method === "POST") return handleConfigPost(req);
           return new Response("method not allowed\n", { status: 405 });
+        }
+        if (url.pathname === "/api/sessions") {
+          // Recent sessions on disk (headers only). Live/parked ones come over
+          // the socket in session_list; the client merges the two by id.
+          const n = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 60));
+          return Response.json({ sessions: listSessions(n) });
         }
         if (url.pathname === "/api/info") {
           try {
