@@ -40,8 +40,23 @@ framework and no build step.
   desktop and the lights. Falls back to the static myx palette.
 - **Activity timeline.** Consecutive thinking and tool calls batch into one collapsible row
   ("Thought for 6s · 3 commands · 1 read"). Every step shares one row anatomy on a
-  vertical rail. Tool input renders readably: shell as `$` lines, short args as chips, not
-  raw JSON.
+  vertical rail.
+- **Tool views.** Each tool gets its own card view, built from what Synaps actually sends:
+  - **edit:** a unified diff with word-level marks, syntax colouring, `+N −M`, and long
+    unchanged runs folded.
+  - **write** / **read:** a numbered, highlighted file view (read shows the file's real line
+    numbers).
+  - **grep:** matches grouped by file, with line numbers and highlighted hits.
+  - **ls** / **find:** listings.
+  - **bash:** a terminal view with ANSI colour for tools that keep it, `exit N` / `timed out`
+    status, and head + tail for long output.
+  - **subagent:** a task card with markdown for the task and the result.
+  - **fetch:** a link card.
+  - **JSON results:** a collapsible tree.
+
+  Every card has copy buttons. Unknown tools keep the generic view (shell as `$` lines,
+  args as chips), and a view that throws falls back to it. All tool data is escaped: a
+  diff line or grep hit containing HTML renders as text.
 - **Steering you can follow.** A steer stays pinned at the bottom (`typed <time>`) until
   the model reads it, then flies to that exact point in the transcript
   (`received <time> · Ns after typed`). It can also end as sent-as-follow-up,
@@ -172,6 +187,7 @@ config's hash is unchanged.
 | `test/sessions.cjs` | Live/Recent split by client count, no bodies in `/api/sessions`, resume keeps the id and history |
 | `test/run-state.cjs` | header pill states, TUI spinner frames + cadence, pulse, layout, reconnect, reduced motion |
 | `test/glow.cjs` | glow speed ramps slow → fast → slow both ways, never snaps, settles and stops at idle, static under reduced motion |
+| `test/tool-views.cjs` | every tool view against real-shaped events, failure detection, folding / truncation / streamed deltas, fallbacks, HTML escaping; then a real turn with real tools |
 | `test/live.cjs` | multi-client: mirror a peer's turn, optionally take over and submit |
 | `test/headless.cjs` | headless DOM smoke check |
 | `test/probe.ts` | raw protocol through the bridge + frame-filter refusals |
@@ -199,6 +215,14 @@ config's hash is unchanged.
   after 90s without receiving data. On a very large session the summary can't finish
   generating in 90s, so every retry times out the same way (shows up as a "hung"
   compaction). Fix upstream: stream the compaction request.
+- `ToolResult` is `{tool_id, result}` with **no error flag**. Failures are text prefixes
+  (`Tool execution failed:`, `Tool call denied:`, `Unknown tool:`), and bash failures read
+  `Command failed (exit N):`. The `bash` tool strips ANSI before the result is sent.
+- Each session fans events out through a 1024-event broadcast buffer
+  (`SYNAPS_SESSION_EVENTS_CAP`). A client that falls further behind gets its oldest events
+  dropped and an `event stream lagged; N dropped` notice. That happens mostly while a huge
+  tool call streams its arguments. The session itself loses nothing; `Resync { since_seq }`
+  exists for recovery.
 
 ## Roadmap
 
@@ -210,7 +234,6 @@ the client doesn't use yet:
 - **Command palette + slash commands** (`⌘K`) over `engine_command` / `plugin_command`.
 - **Context meter + compact.** `ContextReport` / `ContextAssessment` queries; handle
   `CompactionCancelled`.
-- **Edit diffs** rendered from `edit`/`write` tool inputs.
 - **Auto mode and events.** The `Driver*` events, `AutoTurnCapReached`, `External`,
   `ExtensionNotification`.
 - **"Needs you" browser notifications** when the agent is waiting on input.
