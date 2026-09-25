@@ -1431,7 +1431,7 @@ function reconcileList(ul, list, past) {
         // In the daemon (live or detached-in-memory) → attach; disk-only → resume.
         if (S.sessions.some((x) => x.id === s.id)) switchTo(s.id, "mirror");
         else switchTo(s.id, "mirror", { continue: s.id });
-        if (innerWidth < 860) $("app").classList.remove("rail-open");
+        if (innerWidth < 860) { $("app").classList.remove("rail-open"); $("rail-toggle").setAttribute("aria-expanded", "false"); }
       };
       if (ul._ready) anim(li, [{ opacity: 0, transform: "translateX(-10px)" }, { opacity: 1, transform: "none" }], { duration: 260 });
     }
@@ -1765,7 +1765,24 @@ $("input").addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.s
 $("send").onclick = doSend;
 $("takeover").onclick = () => { if (S.sid) switchTo(S.sid, "takeover"); };
 $("new-session").onclick = () => switchTo(null, "mirror", true);
-$("rail-toggle").onclick = () => $("app").classList.toggle(innerWidth < 860 ? "rail-open" : "rail-collapsed");
+// Rail drawer. CSS moves the panel (asymmetric curves, see style.css #app);
+// on open, the session rows that are actually on screen cascade in after it,
+// each a beat later, with a hint of overshoot.
+function railShown() { const a = $("app").classList; return innerWidth < 860 ? a.contains("rail-open") : !a.contains("rail-collapsed"); }
+function toggleRail() {
+  $("app").classList.toggle(innerWidth < 860 ? "rail-open" : "rail-collapsed");
+  const shown = railShown();
+  $("rail-toggle").setAttribute("aria-expanded", String(shown));
+  if (!shown || !motion()) return;
+  const box = $("rail").querySelector(".rail-scroll").getBoundingClientRect();
+  const rows = [...$("rail").querySelectorAll(".rail-scroll li[data-id], .rail-scroll .rail-label")]
+    .filter((li) => { const r = li.getBoundingClientRect(); return r.bottom > box.top && r.top < box.bottom; })
+    .slice(0, 14);
+  rows.forEach((li, i) => anim(li, [{ opacity: 0, transform: "translateX(-14px)" }, { opacity: 1, transform: "none" }],
+    { duration: 380, delay: 140 + i * 28, easing: EASE.pop, fill: "backwards" }));
+}
+$("rail-toggle").setAttribute("aria-expanded", String(railShown()));
+$("rail-toggle").onclick = toggleRail;
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") {
     if (S.prompt) { answer(S.prompt.kind === "secret" ? null : "n"); return; }
