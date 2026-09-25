@@ -30,6 +30,8 @@ const expect = (name, ok, detail) => { if (!ok) fail.push(`${name}${detail !== u
   // tick → the message must stay in the box, not vanish into a closing socket.
   if (await p.evaluate(() => !!S.sid && isOwner())) {
     R.race = await p.evaluate(() => { const i = document.getElementById("input"); i.value = "typed during a switch"; document.getElementById("new-session").click(); doSend(); return i.value; });
+  } else {
+    await p.click("#new-session"); // nothing attached to race with (e.g. a fresh daemon)
   }
   await p.waitForFunction((h) => location.hash && location.hash !== h && S.sid && location.hash.includes(S.sid) && !document.getElementById("input").disabled, h0, { timeout: 20000 }).catch((e) => { throw new Error(`[new-session attach] ${e.message}`); });
   if (R.race !== undefined) {
@@ -46,7 +48,7 @@ const expect = (name, ok, detail) => { if (!ok) fail.push(`${name}${detail !== u
   // ── real: fresh attach shows the daemon's estimate ──
   await p.waitForFunction(() => !document.getElementById("st-ctx").classList.contains("hidden"), null, { timeout: 8000 });
   R.fresh = await meter();
-  expect("fresh attach: estimate shown (~), window from the daemon", R.fresh.cls.includes("est") && R.fresh.txt.startsWith("~") && R.fresh.state.window === 200000 && R.fresh.state.estimate > 0, R.fresh);
+  expect("fresh attach (never measured here): honest '—', never the inflated estimate", R.fresh.cls.includes("unk") && R.fresh.txt === "— / 200k" && R.fresh.state.window === 200000 && R.fresh.state.estimate > 0 && R.fresh.scale === 0, R.fresh);
   expect("fresh attach: compaction tick at budget/window", R.fresh.state.budget > 0 && Math.abs(R.fresh.tick - (R.fresh.state.budget / 200000) * 100) < 0.1, [R.fresh.tick, R.fresh.state.budget]);
 
   // ── real turn → measured ──
@@ -68,6 +70,23 @@ const expect = (name, ok, detail) => { if (!ok) fail.push(`${name}${detail !== u
   R.direct = direct;
   expect("budget + compaction flag match a direct assessment", R.turn.state.budget === direct.budget_tokens && R.turn.state.shouldCompact === direct.should_compact && R.turn.state.window === direct.provider_window, { meter: R.turn.state, direct });
   expect("aria-label states used, window, left", /Context: .+ of 200k used \(\d+%\), .+ left/.test(R.turn.aria), R.turn.aria);
+
+  // ── the refresh case (Haseeb's 1.26M-vs-76% report): a second tab in the SAME
+  // browser opens this session with no Usage in flight → calibrated from the
+  // remembered measurement, not the raw estimate ──
+  {
+    await p.waitForTimeout(700); // idle refresh re-pairs measured with the end-of-turn estimate
+    const sid = await p.evaluate(() => S.sid);
+    const p2 = await p.context().newPage();
+    p2.on("pageerror", (e) => errs.push(`p2: ${e.message}`));
+    await p2.goto(url);
+    await p2.goto(`${new URL(url).origin}/#s=${sid}`);
+    await p2.waitForFunction((sid) => S.sid === sid && !document.getElementById("st-ctx").classList.contains("hidden") && window.__ctx.state.used != null, sid, { timeout: 15000 });
+    R.reopen = await p2.evaluate(() => ({ cls: [...document.getElementById("st-ctx").classList].join(" "), txt: getComputedStyle(document.querySelector("#st-ctx .ctx-txt"), "::before").content.replace(/"/g, "").replace("none", "") + document.querySelector("#st-ctx .ctx-txt").textContent, state: window.__ctx.state }));
+    const m = R.turn.state.measured;
+    expect("reopened tab: calibrated '~' within 1% of the measured value, not the raw estimate", R.reopen.cls.includes("est") && R.reopen.txt.startsWith("~") && Math.abs(R.reopen.state.used - m) / m < 0.01 && R.reopen.state.measured === null, { reopen: R.reopen.state, measured: m });
+    await p2.close();
+  }
 
   // ── popover ──
   await p.click("#st-ctx");

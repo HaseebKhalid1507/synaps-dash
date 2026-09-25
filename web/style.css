@@ -324,6 +324,7 @@ kbd { font: 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; border: 1p
 .ctx.hi .ctx-fill { background: var(--error); }
 .ctx-tick { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--text); opacity: .75; }
 .ctx.est .ctx-txt::before { content: "~"; }
+.ctx.unk .ctx-txt { color: color-mix(in oklab, var(--muted) 85%, transparent); }
 .ctx.compact .ctx-txt { color: var(--warning); }
 #ctx-pop { position: absolute; left: 50%; bottom: 46px; z-index: 30; width: min(340px, calc(100vw - 32px)); margin-left: calc(min(340px, calc(100vw - 32px)) / -2);
   pointer-events: auto; padding: 12px 14px 10px; border-radius: 14px; border: 1px solid var(--line);
