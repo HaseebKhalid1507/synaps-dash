@@ -20,8 +20,13 @@
       <div class="rail-label">Sessions</div>
       <ul id="sessions"></ul>
       <div class="rail-foot">
-        <div id="daemon-info">connecting…</div>
-        <div class="swatches" id="swatches" title="Palette"></div>
+        <button id="open-settings" class="gear" title="Settings (Ctrl+,)" aria-label="Settings">
+          <svg class="i" viewBox="0 0 24 24"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        </button>
+        <div class="foot-meta">
+          <div id="daemon-info">connecting…</div>
+          <div class="swatches" id="swatches" title="Palette"></div>
+        </div>
       </div>
     </aside>
 
@@ -71,6 +76,22 @@
         <button id="modal-no" class="btn-ghost">Deny</button>
         <button id="modal-yes" class="btn-primary">Allow</button>
       </div>
+    </div>
+  </div>
+  <div id="settings" class="hidden" role="dialog" aria-modal="true" aria-labelledby="set-title">
+    <div class="set-sheet">
+      <nav class="set-nav">
+        <div class="set-brand"><div class="mark">S</div><span id="set-title">Settings</span></div>
+        <div class="set-tabs" role="tablist"><div class="set-ind"></div></div>
+        <div class="set-foot"><kbd>Esc</kbd> to close</div>
+      </nav>
+      <section class="set-main">
+        <header class="set-head">
+          <div><h2 id="set-sec-title"></h2><p id="set-sec-sub"></p></div>
+          <button id="close-settings" class="icon-btn" title="Close (Esc)" aria-label="Close"><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+        </header>
+        <div id="set-body" class="set-body"></div>
+      </section>
     </div>
   </div>
   <div id="toasts"></div>
