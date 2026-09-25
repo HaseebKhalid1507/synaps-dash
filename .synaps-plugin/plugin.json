@@ -1,6 +1,6 @@
 {
   "name": "synaps-dash",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "description": "synaps·dash: a sleek browser client for the synaps session daemon. Attach to live sessions as a peer of the TUI, with an album-reactive MXC palette, smooth streaming and a full motion system.",
   "author": "Jawz",
   "license": "MIT",

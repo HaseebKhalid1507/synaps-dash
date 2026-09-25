@@ -28,6 +28,10 @@ const P = {
   brain: '<path d="M9 4a3 3 0 0 0-3 3v.5A3 3 0 0 0 4 10.5 3 3 0 0 0 5 16a3 3 0 0 0 4 3h.5V4z"/><path d="M15 4a3 3 0 0 1 3 3v.5a3 3 0 0 1 2 3 3 3 0 0 1-1 5.5 3 3 0 0 1-4 3h-.5V4z"/>',
   cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
   layers: '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
+  server: '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
+  plug: '<path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0zM12 18v4"/>',
+  key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.3-9.3M17 6l3 3M14.5 8.5l2 2"/>',
+  reset: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
 };
 const svg = (name, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24">${P[name] || P.wrench}</svg>`;
 function toolIcon(name = "") {
@@ -1118,10 +1122,12 @@ document.addEventListener("click", (ev) => {
 });
 
 // ── settings ──────────────────────────────────────────────────────────────────
-// Like the TUI's /settings: session rows go to the daemon (`Set`, owner-only,
-// confirmed by setting_changed); appearance / motion / behavior live in this
-// browser. The TUI's Startup/Daemon/Plugins/Providers rows edit the daemon's
-// config file — deliberately not reachable from a browser.
+// Like the TUI's /settings, minus the TUI-only rows (theme, sidecar key, fps):
+//  - Session: live, over the wire (`Set`, owner-only, confirmed by setting_changed)
+//  - Synaps config: the daemon's config file via /api/config (closed key
+//    allowlist, bridge-validated, flock + atomic rename). Most keys apply on
+//    `daemon reload` — the daemon reads its config once at start.
+//  - Appearance / motion / behavior: this browser (localStorage).
 const PRESETS = {
   myx: null,
   midnight: { colors: { primary: "#7aa2ff", secondary: "#b18cff", accent: "#ff9e64", error: "#ff6b81", warning: "#ffc46b", success: "#7ee2a8", info: "#7aa2ff", text: "#dfe4f5", text_muted: "#8089a8", background: "#0b0d16", background_panel: "#12152a", background_element: "#1a1e36", border: "#5b6392", border_active: "#8b93c2", border_subtle: "#343a5e", border_dimmest: "#1f2340" }, fade_ms: 700 },
@@ -1159,16 +1165,29 @@ const Settings = (() => {
   let models = null; // {model, favorites}
   let advOpen = false;
   const SECTIONS = [
-    { id: "session", icon: "cpu", title: "Session", sub: "Applies to this session live — same as /settings in the TUI." },
-    { id: "appearance", icon: "palette", title: "Appearance", sub: "Saved in this browser." },
-    { id: "motion", icon: "sparkles", title: "Motion", sub: "Animation and streaming feel. Saved in this browser." },
-    { id: "behavior", icon: "sliders", title: "Behavior", sub: "Scrolling and sending. Saved in this browser." },
-    { id: "about", icon: "info", title: "About", sub: "Connection and versions." },
+    { id: "session", group: "This session", icon: "cpu", title: "Session", sub: "Applies to this session live — same as /settings in the TUI." },
+    { id: "defaults", group: "Synaps config", icon: "layers", title: "Defaults", sub: "What new sessions start with.", cfg: true },
+    { id: "agent", group: "Synaps config", icon: "wrench", title: "Agent", sub: "Tool limits, retries and tool policy.", cfg: true },
+    { id: "memory", group: "Synaps config", icon: "brain", title: "Context & memory", sub: "Context management, prompt caching and the memory backend.", cfg: true },
+    { id: "daemon", group: "Synaps config", icon: "server", title: "Daemon", sub: "Session daemon timers and startup.", cfg: true },
+    { id: "plugins", group: "Synaps config", icon: "plug", title: "Plugins", sub: "Turn extensions on or off.", cfg: true },
+    { id: "providers", group: "Synaps config", icon: "key", title: "Providers", sub: "Which model providers are set up. Status only — keys never reach the browser.", cfg: true },
+    { id: "appearance", group: "This browser", icon: "palette", title: "Appearance", sub: "Saved in this browser." },
+    { id: "motion", group: "This browser", icon: "sparkles", title: "Motion", sub: "Animation and streaming feel. Saved in this browser." },
+    { id: "behavior", group: "This browser", icon: "sliders", title: "Behavior", sub: "Scrolling and sending. Saved in this browser." },
+    { id: "about", group: "", icon: "info", title: "About", sub: "Connection and versions." },
   ];
+  let cfg = null; // /api/config snapshot
+  window.__cfgWrites = []; // test hook: every config write + result
   P.palette = '<circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2a10 10 0 0 0 0 20c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.4A5.6 5.6 0 0 0 22 10c0-4.4-4.5-8-10-8z"/>';
   P.sliders = '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>';
   P.info = '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>';
+  let lastGroup = null;
   for (const sec of SECTIONS) {
+    if (sec.group !== lastGroup) {
+      lastGroup = sec.group;
+      tabs.append(h("div", `set-grp${sec.group ? "" : " gap"}`, sec.group));
+    }
     const b = h("button", "set-tab");
     b.dataset.sec = sec.id;
     b.innerHTML = `${svg(sec.icon)}<span>${sec.title}</span>`;
@@ -1256,7 +1275,7 @@ const Settings = (() => {
   function modelPicker(current, list, onPick) {
     const w = h("div", "mdl");
     const btn = h("button", "mdl-btn");
-    const label = (m) => { const [prov, name] = m.includes("/") ? m.split(/\/(.*)/) : ["", m]; return `<span class="mdl-prov">${esc(prov)}</span><span class="mdl-name">${esc(name)}</span>`; };
+    const label = (m) => { if (!m) return '<span class="mdl-name dim">not set — Synaps default</span>'; const [prov, name] = m.includes("/") ? m.split(/\/(.*)/) : ["", m]; return `<span class="mdl-prov">${esc(prov)}</span><span class="mdl-name">${esc(name)}</span>`; };
     btn.innerHTML = `${label(current)}${svg("chev", "i chev")}`;
     const pop = h("div", "mdl-pop hidden");
     const all = [...new Set([current, ...(list || [])].filter(Boolean))];
@@ -1367,6 +1386,270 @@ const Settings = (() => {
     if (!own) frag.querySelectorAll("button:not(.btn-ghost), input").forEach((x) => { if (!x.closest(".set-adv > summary")) x.disabled = true; });
     return frag;
   }
+  // ── Synaps config (via the bridge's /api/config) ────────────────────────────
+  const APPLIES = { reload: "on reload", live: "live", start: "next daemon start", launch: "next TUI launch" };
+  const APPLIES_HELP = {
+    reload: "The daemon reads its config once, at start. Takes effect after a daemon reload.",
+    live: "Takes effect right away.",
+    start: "Read when a client auto-starts a daemon; a reload keeps the current value.",
+    launch: "Read by the TUI when it launches.",
+  };
+  const LABEL = {}; // config key → row label (for the pending banner)
+  async function loadConfig() {
+    try { cfg = await (await fetch("/api/config")).json(); } catch { cfg = null; }
+    if (SECTIONS.find((x) => x.id === section)?.cfg) render(true);
+  }
+  function pill(key) {
+    const pend = cfg?.pending?.includes(key);
+    const a = cfg?.applies?.[key] || "reload";
+    const p = h("span", `set-pill${pend ? " pending" : ""} ap-${a}`, pend ? "reload pending" : APPLIES[a]);
+    p.title = APPLIES_HELP[a];
+    return p;
+  }
+  function addReset(r, key) {
+    if (key === "disabled_plugins" || r.querySelector(".set-reset")) return;
+    const rs = h("button", "set-reset");
+    rs.innerHTML = svg("reset");
+    rs.title = `Reset to default (removes ${key} from the config)`;
+    rs.onclick = () => setConfig(r, key, null, true);
+    r.querySelector(".set-ctl").prepend(rs);
+  }
+  function crow(key, label, help, control) {
+    LABEL[key] = label;
+    const r = row(label, help, control);
+    r.dataset.cfg = key;
+    r.dataset.key = `cfg:${key}`;
+    r.querySelector(".set-name").append(pill(key));
+    if (cfg.values[key] !== null) addReset(r, key);
+    if (!cfg.writable) r.querySelectorAll("button, input").forEach((x) => (x.disabled = true));
+    return r;
+  }
+  const cv = (key, dflt) => (cfg.values[key] ?? dflt);
+  async function setConfig(r, key, value, rerenderAfter) {
+    if (!cfg?.writable) { toast("This config is read-only from here"); return; }
+    r._st.className = "set-st busy";
+    r._st.innerHTML = '<span class="spinner"></span>';
+    let res;
+    try {
+      const x = await fetch("/api/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key, value }) });
+      res = await x.json();
+    } catch (e) {
+      res = { ok: false, error: `bridge unreachable: ${e}` };
+    }
+    window.__cfgWrites.push({ key, value, ok: !!res.ok, error: res.error || null });
+    recent.set(`cfg:${key}`, { ok: !!res.ok, message: res.error, until: performance.now() + (res.ok ? 1800 : 8000) });
+    if (res.ok) { const { ok, ...snap } = res; cfg = snap; }
+    if (key === "favorite_models" || key === "model") fetch("/api/models").then((x) => x.json()).then((m) => { models = m; }).catch(() => {});
+    if (!res.ok || rerenderAfter) { render(true); return; } // failed → controls snap back to the real value
+    if (r.isConnected) {
+      paintStatus(r, true, null, true);
+      setTimeout(() => { if (r._st.classList.contains("ok")) { r._st.className = "set-st"; r._st.innerHTML = ""; } }, 1800);
+      if (value !== null) addReset(r, key); // the key is now explicitly set
+      else r.querySelector(".set-reset")?.remove(); // e.g. context window → Auto
+    }
+    refreshPending();
+  }
+  function pendingNote() {
+    const n = h("div", "set-note warn set-pending");
+    n.id = "set-pending";
+    const keys = cfg?.pending || [];
+    if (!keys.length) { n.classList.add("hidden"); return n; }
+    const txt = h("div", "set-pend-txt");
+    txt.append(h("div", "set-pend-h", `${keys.length} change${keys.length > 1 ? "s" : ""} waiting for a daemon reload`));
+    txt.append(h("div", "set-pend-k", keys.map((k) => LABEL[k] || k).join(" · ")));
+    const cmdRow = h("div", "set-pend-cmd");
+    cmdRow.append(h("code", "set-code", cfg.reloadCmd));
+    const b = h("button", "copy");
+    b.innerHTML = `${svg("copy")}<span>Copy</span>`;
+    b.onclick = () => { navigator.clipboard?.writeText(cfg.reloadCmd); b.lastChild.textContent = "Copied"; setTimeout(() => (b.lastChild.textContent = "Copy"), 1200); };
+    cmdRow.append(b);
+    txt.append(cmdRow);
+    txt.append(h("div", "set-pend-foot", "Sessions survive a reload. This page gets a new token — reopen its URL afterwards."));
+    n.append(txt);
+    return n;
+  }
+  function refreshPending() {
+    const old = body.querySelector("#set-pending");
+    if (old) old.replaceWith(pendingNote());
+    for (const r of body.querySelectorAll(".set-row[data-cfg]")) {
+      const p = r.querySelector(".set-pill");
+      if (p) p.replaceWith(pill(r.dataset.cfg));
+    }
+  }
+  function cfgHead(frag) {
+    const where = h("div", "set-path");
+    where.innerHTML = `${svg("file")}<span>${esc(cfg.path)}</span>${cfg.profile ? `<span class="set-pill">profile ${esc(cfg.profile)}</span>` : ""}`;
+    frag.append(where);
+    if (!cfg.writable) frag.append(h("div", "set-note warn", `Read-only: ${cfg.profile ? `profile '${cfg.profile}' has no config file of its own (it reads the default one). Create ${cfg.writePath} to edit it here.` : "the config file can't be locked on this system."}`));
+    frag.append(pendingNote());
+  }
+  function sub(frag, text) { frag.append(h("div", "set-subhd", text)); }
+  const ctl = (r, el) => { r.querySelector(".set-ctl").append(el); return r; };
+  function cseg(frag, key, label, help, options, dflt, map = (x) => x) {
+    const r = crow(key, label, help, h("span"));
+    const cur = cv(key, dflt);
+    r.querySelector(".set-ctl").replaceChild(segmented(options, cur, (v) => setConfig(r, key, map(v))), r.querySelector(".set-ctl > span:not(.set-st)"));
+    frag.append(r);
+    return r;
+  }
+  function cnum(frag, key, label, help, dflt, o) {
+    const r = crow(key, label, help, h("span"));
+    r.querySelector(".set-ctl").replaceChild(stepper(Number(cv(key, dflt)), o, (v) => setConfig(r, key, String(v))), r.querySelector(".set-ctl > span:not(.set-st)"));
+    frag.append(r);
+    return r;
+  }
+  function ctog(frag, key, label, help, dflt, on = "true", off = "false") {
+    const r = crow(key, label, help, h("span"));
+    r.querySelector(".set-ctl").replaceChild(toggle(cv(key, dflt) === on, (v) => setConfig(r, key, v ? on : off)), r.querySelector(".set-ctl > span:not(.set-st)"));
+    frag.append(r);
+    return r;
+  }
+  function cmodel(frag, key, label, help) {
+    const r = crow(key, label, help, h("span"));
+    const mp = modelPicker(cfg.values[key], models?.favorites, (m) => setConfig(r, key, m, true));
+    r.querySelector(".set-ctl").replaceChild(mp, r.querySelector(".set-ctl > span:not(.set-st)"));
+    if (!cfg.writable) mp._btn.disabled = true;
+    frag.append(r);
+    return r;
+  }
+  function needCfg() {
+    if (cfg) return null;
+    const frag = document.createDocumentFragment();
+    frag.append(h("div", "set-note", "Loading config…"));
+    return frag;
+  }
+
+  function renderDefaults() {
+    const frag = needCfg(); if (frag) return frag;
+    const f = document.createDocumentFragment();
+    cfgHead(f);
+    cmodel(f, "model", "Model", "The model a new session starts on.");
+    const thinkOpts = ["off", "low", "medium", "high", "xhigh", "max"];
+    const t = cfg.values.thinking;
+    if (t && !thinkOpts.includes(t)) thinkOpts.push(t);
+    cseg(f, "thinking", "Thinking", "Starting reasoning depth; the daemon clamps it to what the model supports.", thinkOpts, t);
+    cseg(f, "context_window", "Context window", "Auto lets Synaps pick per model.", [["200k", "200k"], ["1m", "1M"], ["auto", "Auto"]], "auto", (x) => (x === "auto" ? null : x));
+    sub(f, "Compaction");
+    cmodel(f, "compaction_model", "Compaction model", "Model that writes the summary when a session is compacted. Not set = the session's own model.");
+    cseg(f, "compaction_mode", "Compaction mode", "Remote uses the provider's API; local keeps it on this machine.", [["remote", "Remote"], ["local", "Local"]], "remote");
+    sub(f, "Favorites");
+    const fr = crow("favorite_models", "Favorite models", "Shown first in every model picker — here and in the TUI.", h("span"));
+    fr.classList.add("set-row-wide");
+    const favs = (cfg.values.favorite_models || "").split(",").map((x) => x.trim()).filter(Boolean);
+    const box = h("div", "fav-list");
+    for (const m of favs) {
+      const c = h("span", "fav");
+      c.append(h("span", "fav-name", m));
+      const x = h("button", "fav-x");
+      x.innerHTML = svg("x");
+      x.title = `Remove ${m}`;
+      x.onclick = () => { const next = favs.filter((y) => y !== m); setConfig(fr, "favorite_models", next.length ? next.join(", ") : null, true); };
+      c.append(x);
+      box.append(c);
+    }
+    const add = h("input", "fav-add");
+    add.placeholder = "provider/model — Enter to add";
+    add.onkeydown = (e) => {
+      if (e.key !== "Enter") return;
+      const v = add.value.trim();
+      if (!/^[\w.-]+\/[\w.:-]+$/.test(v)) { toast("Use provider/model, e.g. anthropic/claude-opus-4-6"); return; }
+      if (!favs.includes(v)) setConfig(fr, "favorite_models", [...favs, v].sort().join(", "), true);
+      add.value = "";
+    };
+    box.append(add);
+    fr.querySelector(".set-ctl").replaceChild(box, fr.querySelector(".set-ctl > span:not(.set-st)"));
+    if (!cfg.writable) fr.querySelectorAll("button, input").forEach((x) => (x.disabled = true));
+    f.append(fr);
+    return f;
+  }
+  function renderAgent() {
+    const frag = needCfg(); if (frag) return frag;
+    const f = document.createDocumentFragment();
+    cfgHead(f);
+    sub(f, "Tools");
+    cnum(f, "bash_timeout", "Bash timeout", "Default time limit for a shell command.", 30, { min: 1, max: 3600, step: 5, unit: "s" });
+    cnum(f, "bash_max_timeout", "Bash max timeout", "Upper bound a command may request.", 300, { min: 1, max: 86400, step: 30, unit: "s" });
+    cnum(f, "max_tool_output", "Max tool output", "Tool output kept per call.", 30000, { min: 1, max: 4096, step: 4, unit: "KB", toView: (b) => Math.max(1, Math.round(b / 1024)), fromView: (k) => k * 1024 });
+    cnum(f, "subagent_timeout", "Subagent timeout", "Time limit for a delegated subagent.", 300, { min: 10, max: 86400, step: 30, unit: "s" });
+    cseg(f, "tools.activation_confirm", "Tool activation", "When the model asks to switch on a tool it found via search_tools: allow it, ask you, or refuse.", [["auto", "Auto"], ["prompt", "Ask"], ["deny", "Deny"]], "auto");
+    ctog(f, "progressive_tool_disclosure", "Progressive tool disclosure", "Start with a small core toolset; the model finds the rest with search_tools. Saves tokens.", "false");
+    sub(f, "Retries");
+    cnum(f, "api_retries", "API retries", "Retries on transient provider errors.", 3, { min: 0, max: 20, step: 1, unit: "" });
+    cnum(f, "refusal_retries", "Refusal retries", "Retries when the provider returns a refusal.", 2, { min: 0, max: 10, step: 1, unit: "" });
+    sub(f, "Events");
+    ctog(f, "events.auto_turn", "Auto-turn on events", "Let inbox events (watchers, subagent completions) wake the agent without a new message from you.", "true");
+    cnum(f, "events.auto_turn_cap", "Auto-turn cap", "Most auto-turns in a row before it waits for you. 0 = unlimited.", 5, { min: 0, max: 1000, step: 1, unit: "" });
+    return f;
+  }
+  function renderMemory() {
+    const frag = needCfg(); if (frag) return frag;
+    const f = document.createDocumentFragment();
+    cfgHead(f);
+    cseg(f, "context_management.mode", "Context management", "Auto watches context pressure and wraps up or rolls over before the window fills.", [["off", "Off"], ["auto", "Auto"]], "off");
+    cseg(f, "cache_ttl", "Prompt cache TTL", "How long the provider keeps the prompt cache warm. 1h costs more to write and saves on long pauses.", [["5m", "5 min"], ["1h", "1 hour"], ["hybrid", "Hybrid"]], "5m");
+    cseg(f, "memory.backend", "Memory backend", "Axel needs its memory service configured (memory.axel.*); switching back to legacy leaves those keys alone.", [["legacy", "Legacy"], ["axel", "Axel"]], "legacy");
+    return f;
+  }
+  function renderDaemon() {
+    const frag = needCfg(); if (frag) return frag;
+    const f = document.createDocumentFragment();
+    cfgHead(f);
+    const run = cfg.idleExitRunning;
+    cnum(f, "daemon.idle_exit_secs", "Idle exit", `How long an auto-started daemon waits with no clients before it exits. 0 = never.${run !== null ? ` This one was started with --idle-exit ${run}.` : ""}`, 10, { min: 0, max: 604800, step: 10, unit: "s" });
+    cnum(f, "daemon.prompt_abandon_secs", "Prompt abandon", "A session waiting on your answer with nobody attached gives up after this. 0 = never.", 3600, { min: 0, max: 604800, step: 60, unit: "s" });
+    cnum(f, "daemon.parked_evict_secs", "Parked eviction", "An idle, detached session is dropped from memory after this (it stays on disk). 0 = never.", 3600, { min: 0, max: 604800, step: 60, unit: "s" });
+    sub(f, "Startup");
+    ctog(f, "startup.quick_start", "Quick start", "Don't wait for extensions before the first turn. Faster, but a slow extension's tools may miss turn 1.", "on", "on", "off");
+    cnum(f, "startup.extensions_ready_timeout_secs", "Extensions-ready wait", "With quick start off: the longest to wait for extensions.", 30, { min: 1, max: 600, step: 5, unit: "s" });
+    return f;
+  }
+  function renderPlugins() {
+    const frag = needCfg(); if (frag) return frag;
+    const f = document.createDocumentFragment();
+    cfgHead(f);
+    LABEL.disabled_plugins = "Plugins";
+    const disabled = (cfg.values.disabled_plugins || "").split(",").map((x) => x.trim()).filter(Boolean);
+    if (!cfg.plugins.length) f.append(h("div", "set-note", "No plugins installed."));
+    for (const pl of cfg.plugins) {
+      const help = pl.self ? "This page. Turn it off from the TUI — a browser can't unplug itself." : pl.description || "";
+      const r = crow("disabled_plugins", pl.name, help, h("span"));
+      r.dataset.key = `cfg:plugin:${pl.name}`;
+      r.dataset.plugin = pl.name;
+      const nm = r.querySelector(".set-name");
+      nm.insertBefore(h("span", "set-pill ghost", `${pl.scope}${pl.version ? ` · v${pl.version}` : ""}`), nm.querySelector(".set-pill"));
+      const tg = toggle(pl.enabled, (on) => {
+        const next = on ? disabled.filter((x) => x !== pl.name) : [...new Set([...disabled, pl.name])];
+        setConfig(r, "disabled_plugins", next.length ? next.join(", ") : null, true);
+      });
+      if (pl.self || !cfg.writable) tg.disabled = true;
+      r.querySelector(".set-ctl").replaceChild(tg, r.querySelector(".set-ctl > span:not(.set-st)"));
+      f.append(r);
+    }
+    const unknown = disabled.filter((x) => !cfg.plugins.some((p) => p.name === x));
+    if (unknown.length) f.append(h("div", "set-note", `Also disabled, not installed here: ${unknown.join(", ")}. Left as they are.`));
+    return f;
+  }
+  function renderProviders() {
+    const frag = needCfg(); if (frag) return frag;
+    const f = document.createDocumentFragment();
+    if (!cfg.providers.length) f.append(h("div", "set-note", "No providers set up."));
+    else {
+      const card = h("div", "set-card");
+      for (const pv of cfg.providers) {
+        const r = h("div", "set-kv prov");
+        r.append(h("span", "k", pv.name));
+        const v = h("span", "v");
+        v.append(document.createTextNode(pv.kind));
+        if (pv.note) v.append(h("span", "prov-note", ` · ${pv.note}`));
+        r.append(v, h("span", "set-pill ghost", pv.source === "login" ? "signed in" : "config"));
+        card.append(r);
+      }
+      f.append(card);
+    }
+    f.append(h("div", "set-note", "Keys and tokens never reach the browser. Add or rotate them with synaps login, or in the config file."));
+    return f;
+  }
+
   function renderAppearance() {
     const frag = document.createDocumentFragment();
     const sw = (k) => PRESETS[k] ? `linear-gradient(135deg, ${PRESETS[k].colors.primary}, ${PRESETS[k].colors.secondary})` : k === "album" ? "conic-gradient(from 0deg, var(--primary), var(--secondary), var(--accent), var(--primary))" : "linear-gradient(135deg, #82aaff, #c099ff)";
@@ -1405,14 +1688,16 @@ const Settings = (() => {
     frag.append(card);
     return frag;
   }
-  const RENDER = { session: renderSession, appearance: renderAppearance, motion: renderMotion, behavior: renderBehavior, about: renderAbout };
+  const RENDER = { session: renderSession, defaults: renderDefaults, agent: renderAgent, memory: renderMemory, daemon: renderDaemon, plugins: renderPlugins, providers: renderProviders, appearance: renderAppearance, motion: renderMotion, behavior: renderBehavior, about: renderAbout };
 
   function render(quiet) {
     if (section === "session") lastKey = sessionKey();
     const sec = SECTIONS.find((x) => x.id === section);
     $("set-sec-title").textContent = sec.title;
     $("set-sec-sub").textContent = sec.sub;
+    const keep = quiet ? body.scrollTop : 0;
     body.replaceChildren(RENDER[section]());
+    body.scrollTop = keep;
     const now = performance.now();
     for (const r of body.querySelectorAll(".set-row[data-key]")) {
       const x = recent.get(r.dataset.key);
@@ -1434,6 +1719,7 @@ const Settings = (() => {
     anim(g.querySelector(".i"), [{ transform: "rotate(0)" }, { transform: "rotate(120deg)" }], { duration: 420, easing: EASE.out });
     fetch("/api/models").then((r) => r.json()).then((m) => { models = m; if (section === "session") render(true); }).catch(() => {});
     fetch("/api/info").then((r) => r.json()).then((i) => { S.bridgeVersion = i.bridge; if (section === "about") render(true); }).catch(() => {});
+    void loadConfig();
     show(sec || section);
   }
   function close() {
