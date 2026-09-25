@@ -1,5 +1,5 @@
-// Steer position semantics: queued = where the human typed it (later output flows
-// below); delivered = moved to where the model received it. Real turn, sandbox.
+// Steer position semantics: queued = pinned at the bottom (later output flows in
+// ABOVE it); delivered = lands where the model received it. Real turn, sandbox.
 const { chromium } = require(process.env.HOME + "/Projects/SynapsDASH/node_modules/playwright");
 const fs = require("fs");
 (async () => {
@@ -16,11 +16,11 @@ const fs = require("fs");
   await p.waitForFunction(() => (document.querySelector(".msg.asst .md")?.textContent || "").length > 20, null, { timeout: 60000 });
   await p.fill("#input", "In your closing sentence, include the word KIWI.");
   await p.press("#input", "Enter");
-  const lab = () => p.evaluate(() => [...document.getElementById("thread").children].map((k) => k.classList.contains("steer") ? `STEER[${k.dataset.steer}]` : k.classList.contains("user") ? "USER" : k.classList.contains("asst") ? `ASST${k.classList.contains("cont") ? "(cont)" : ""}${k.querySelector(".tool") ? "+tool" : ""}` : k.id || k.className.split(" ")[0]));
+  const lab = () => p.evaluate(() => [...document.getElementById("thread").children].flatMap((k) => k.id === "steer-tray" ? (k.children.length ? ["TRAY[" + [...k.children].map((c) => c.dataset.steer).join(",") + "]"] : []) : [k]).map((k) => typeof k === "string" ? k : k.classList.contains("steer") ? `STEER[${k.dataset.steer}]` : k.classList.contains("user") ? "USER" : k.classList.contains("asst") ? `ASST${k.classList.contains("cont") ? "(cont)" : ""}${k.querySelector(".tool") ? "+tool" : ""}` : k.id || k.className.split(" ")[0]));
   await p.waitForTimeout(300);
   const typed = await lab();
-  // wait until output that arrived AFTER typing shows up below the queued steer
-  await p.waitForFunction(() => { const st = document.querySelector(".msg.user.steer"); return st && st.dataset.steer !== "delivered" && st.nextElementSibling?.classList.contains("asst"); }, null, { timeout: 60000 }).catch(() => {});
+  // while queued the steer must stay pinned LAST, with new output above it
+  await p.waitForFunction(() => { const st = document.querySelector(".msg.user.steer"); return st && st.dataset.steer !== "delivered" && document.querySelector(".tool"); }, null, { timeout: 60000 }).catch(() => {});
   const beforeDelivery = await lab();
   await p.waitForFunction(() => document.querySelector(".msg.user.steer")?.dataset.steer === "delivered", null, { timeout: 90000 });
   const atDelivery = await lab();
@@ -36,6 +36,7 @@ const fs = require("fs");
   console.log("AT DELIVERY     ", atDelivery.join(" → "));
   console.log("FINAL           ", (await lab()).join(" → "));
   console.log("CHECK", JSON.stringify(fin));
+  console.log("PINNED WHILE QUEUED:", /TRAY\[(queued|waiting)\]$/.test(beforeDelivery.join(" → ")) && /TRAY\[(queued|waiting)\]$/.test(typed.join(" → ")));
   console.log("ERRORS", errs.length ? errs : "none");
   await b.close();
 })().catch((e) => { console.error("FATAL", e.message); process.exit(1); });

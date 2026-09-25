@@ -417,3 +417,6 @@ kbd { font: 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; border: 1p
 @keyframes landed { 0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--success) 70%, transparent); transform: scale(1.02); } 100% { box-shadow: 0 0 0 10px transparent; transform: none; } }
 .steer-when { font-variant-numeric: tabular-nums; }
 .msg.user.steer[data-steer="delivered"] .steer-when { color: color-mix(in oklab, var(--success) 70%, var(--muted)); }
+/* pending steers: pinned at the bottom of the thread until delivered */
+#steer-tray { display: flex; flex-direction: column; gap: 10px; }
+.msg.user.steer.pending .bubble { opacity: .85; }
