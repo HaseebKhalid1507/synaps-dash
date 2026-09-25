@@ -169,7 +169,15 @@ function follow() {
   });
 }
 $("jump").onclick = () => { SC.scrollTo({ top: SC.scrollHeight, behavior: "smooth" }); $("jump").classList.remove("show"); };
-const add = (node, parent = T) => { parent.append(node); follow(); return node; };
+// Pending steers live in a tray that is always the LAST child of the thread;
+// normal output inserts above it. A steer leaves the tray only when an event
+// tells us where it actually entered the conversation.
+const trayEl = () => { const t = document.getElementById("steer-tray"); return t && t.parentNode === T ? t : null; };
+const add = (node, parent = T) => {
+  if (parent === T) T.insertBefore(node, trayEl()); else parent.append(node);
+  follow();
+  return node;
+};
 
 // ── transcript ────────────────────────────────────────────────────────────────
 const kindLabel = (k) => (k === "server" ? "web" : k || "?");
@@ -202,27 +210,59 @@ const STEER = {
   lost: ["✗", "not delivered"],
 };
 const STEER_OPEN = ["sending", "queued", "waiting"];
-function setSteer(st, state) {
+const clockS = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+const toDate = (ts) => { const d = ts ? new Date(ts) : new Date(); return isNaN(d) ? new Date() : d; };
+// Times come from the daemon's event envelope (`ts`), not the browser clock:
+// typed = `steered` (daemon got it), received = `steering_delivered` (model read it).
+function setSteer(st, state, ts) {
   st.state = state;
   st.m.dataset.steer = state;
+  if (ts && state !== "sending") st.at = toDate(ts);
   const [ico, label] = STEER[state];
   st.st.innerHTML = "";
   st.st.append(h("span", "ico", ico), h("span", null, label));
+  const typed = clockS(st.typedAt);
+  if (state === "delivered" && st.at) {
+    const lag = Math.max(0, Math.round((st.at - st.typedAt) / 1000));
+    st.when.textContent = `received ${clockS(st.at)} · ${lag}s after typed`;
+    st.m.title = `typed ${typed} · received by the model ${clockS(st.at)}`;
+  } else if (state === "followup" && st.at) {
+    st.when.textContent = `sent as follow-up ${clockS(st.at)}`;
+    st.m.title = `typed ${typed} · sent as the next message ${clockS(st.at)}`;
+  } else {
+    st.when.textContent = `typed ${typed}`;
+    st.m.title = `typed ${typed}`;
+  }
 }
-function addSteer(text, by, local, state) {
-  splitAsst();
-  const m = h("div", "msg user steer");
+function addSteer(text, by, local, state, ts) {
+  const m = h("div", "msg user steer pending");
   const meta = h("div", "meta");
   const st = h("span", "steer-st");
-  meta.append(`steer · ${by} · ${clock()} · `, st);
+  const when = h("span", "steer-when");
+  meta.append(`steer · ${by} · `, when, " · ", st);
   m.append(h("div", "bubble", text), meta);
+  // Queued: sits where the human typed it. Output the model produces before it
+  // reads the steer flows BELOW (new segment), because the model hasn't seen it.
+  splitAsst();
   add(m);
-  const rec = { text, m, st, local, state: "" };
+  const rec = { text, m, st, when, local, state: "", typedAt: toDate(ts), at: null };
   S.steers.push(rec);
   setSteer(rec, state);
   return rec;
 }
 const findSteer = (text, states = STEER_OPEN) => S.steers.find((x) => x.text === text && states.includes(x.state));
+// Delivered (or follow-up / returned / lost): move the bubble from where it was
+// typed down to where it took effect — end the current reply segment, drop the
+// bubble at the end of the thread, and let the reply continue below it.
+function landSteer(st) {
+  if (!st || !st.m.classList.contains("pending")) return;
+  splitAsst();
+  st.m.classList.remove("pending");
+  T.insertBefore(st.m, trayEl());
+  st.m.classList.add("landed");
+  setTimeout(() => st.m.classList.remove("landed"), 1400);
+  follow();
+}
 
 function newAsst(cont = false) {
   const root = h("div", `msg asst live${cont ? " cont" : ""}`);
@@ -549,7 +589,7 @@ function onFrame(f) {
     case "refused": setConn("down", "refused"); toast(f.message, "err", 8000); return;
     case "session_list": S.sessions = f.sessions; renderSessions(); return;
     case "attached": return onAttached(f);
-    case "event": if (f.session_id === S.sid) onEvent(f.event); return;
+    case "event": if (f.session_id === S.sid) onEvent(f.event, f.ts); return;
     case "error": toast(f.message, "err", 6000); return;
   }
 }
@@ -588,6 +628,7 @@ function onAttached(a) {
   $("st-model").textContent = S.model.replace(/^.*\//, "");
   updateCost(a.conversation);
   T.innerHTML = "";
+  S.steers = [];
   // `replay` holds the LAST turn even after it finished — apply it only mid-turn,
   // else the finished turn renders twice (display_tail already has it).
   const replay = a.streaming ? (a.replay ?? []) : [];
@@ -595,7 +636,7 @@ function onAttached(a) {
   renderTail(a.display_tail, !!ts0 && (ts0.trigger === "user" || ts0.trigger === "plugin_command"));
   if (!T.children.length) emptyState(S.title || "New session", "Say something — every client on this session sees it live.");
   S.replaying = true;
-  for (const env of replay) onEvent(env.event);
+  for (const env of replay) onEvent(env.event, env.ts);
   S.replaying = false;
   S.streaming = !!a.streaming;
   if (S.streaming && !S.cur) newAsst();
@@ -605,9 +646,9 @@ function onAttached(a) {
   if (isOwner()) $("input").focus();
 }
 
-function onEvent(e) {
+function onEvent(e, ts) {
   switch (e.ev) {
-    case "stream": return onStream(e.event);
+    case "stream": return onStream(e.event, ts);
     case "turn_started": {
       T.querySelector(".empty")?.remove();
       S.streaming = true;
@@ -627,7 +668,7 @@ function onEvent(e) {
         }
       } else if (trig === "queued_auto" && e.user_text) {
         const st = findSteer(e.user_text);
-        if (st) setSteer(st, "followup"); else addUser(e.user_text, "queued");
+        if (st) { setSteer(st, "followup", ts); landSteer(st); } else addUser(e.user_text, "queued");
       }
       else addSys(`turn started · ${trig}`);
       finishAsst();
@@ -638,7 +679,7 @@ function onEvent(e) {
     case "conversation": return updateCost(e.digest);
     case "idle":
       S.streaming = false;
-      for (const st of S.steers) if (st.state === "sending") setSteer(st, "lost");
+      for (const st of S.steers) if (st.state === "sending") { setSteer(st, "lost", ts); landSteer(st); }
       S.steers = S.steers.filter((st) => STEER_OPEN.includes(st.state));
       finishAsst(); renderComposer(); return;
     case "prompt": return showPrompt(e.request);
@@ -650,14 +691,16 @@ function onEvent(e) {
       if (/^input is owned by client #\d+/.test(e.text)) return;
       return addSys(e.text);
     case "steered": {
-      const st = findSteer(e.text, ["sending"]) || addSteer(e.text, S.owner != null && S.owner !== S.me ? who(S.owner) : "peer", false, "sending");
-      setSteer(st, e.delivered ? "queued" : "waiting");
+      const st = findSteer(e.text, ["sending"]) || addSteer(e.text, S.owner != null && S.owner !== S.me ? who(S.owner) : "peer", false, "sending", ts);
+      st.typedAt = toDate(ts); // daemon receipt time — authoritative "typed"
+      setSteer(st, e.delivered ? "queued" : "waiting", ts);
       return;
     }
     case "dequeued": {
       const st = findSteer(e.text);
       if (!st) { toast(`Not delivered: ${e.text.slice(0, 80)}`); return; }
-      setSteer(st, "returned");
+      setSteer(st, "returned", ts);
+      landSteer(st);
       const input = $("input");
       if (st.local && isOwner() && !input.value.trim()) { input.value = e.text; autosize(); renderComposer(); }
       return;
@@ -675,7 +718,7 @@ function onEvent(e) {
       renderPresence(); renderComposer(); return;
     case "aborted": S.streaming = false; finishAsst(); addSys("turn stopped", "err"); renderComposer(); return;
     case "ended": addSys("session ended", "err"); S.sid = null; renderComposer(); return;
-    case "cleared": T.innerHTML = ""; S.sid = e.session_id; emptyState("Fresh session", "The conversation was cleared."); return;
+    case "cleared": T.innerHTML = ""; S.steers = []; S.sid = e.session_id; emptyState("Fresh session", "The conversation was cleared."); return;
     case "refused":
       if (e.client === S.me) {
         toast(`Refused: ${e.reason}`, "err", 5000);
@@ -693,7 +736,7 @@ function onEvent(e) {
   }
 }
 
-function onStream(s) {
+function onStream(s, ts) {
   if (s.kind === "llm") {
     switch (s.llm) {
       case "response_start": asst(); return;
@@ -711,7 +754,7 @@ function onStream(s) {
     else if (s.session === "error") addSys(`error: ${s.message}`, "err");
     else if (s.session === "notice") addSys(s.text);
   } else if (s.kind === "agent") {
-    if (s.agent === "steering_delivered") { const st = findSteer(s.message); if (st) setSteer(st, "delivered"); }
+    if (s.agent === "steering_delivered") { const st = findSteer(s.message); if (st) { setSteer(st, "delivered", ts); landSteer(st); } }
     else if (s.agent === "subagent_start") addSys(`⇢ ${s.agent_name}: ${s.task_preview}`);
     else if (s.agent === "subagent_done") addSys(`⇠ ${s.agent_name} done · ${s.duration_secs.toFixed(1)}s`);
   }
