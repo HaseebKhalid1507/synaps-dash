@@ -19,6 +19,7 @@ const expect = (name, ok, detail) => { if (!ok) fail.push(`${name}${detail !== u
   await p.goto(url);
   await p.waitForFunction(() => document.getElementById("conn").classList.contains("up"), null, { timeout: 15000 });
   await p.evaluate(() => setPref("motion", "full"));
+  await p.waitForFunction(() => S.sid || /No live sessions/.test(document.getElementById("thread").textContent), null, { timeout: 15000 }); // let the page's own auto-attach settle first
   const h0 = await p.evaluate(() => location.hash);
   await p.click("#new-session");
   await p.waitForFunction((h) => location.hash && location.hash !== h && !document.getElementById("input").disabled, h0, { timeout: 20000 });

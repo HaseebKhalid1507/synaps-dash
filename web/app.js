@@ -183,6 +183,102 @@ const RunState = (() => {
   }
   return { render, get state() { return state; } };
 })();
+
+// ── context meter (status line) ───────────────────────────────────────────────
+// Used vs window, like the TUI footer: used = input + cache_read + cache_create
+// of the last request's Usage event (measured). Before any Usage (fresh attach,
+// after compaction/clear) it falls back to the daemon's ContextAssessment
+// estimate. The assessment also gives the request-aware budget: window minus
+// per-request reserves (max output, thinking, next tool result, margin) — past
+// it Synaps's compaction trigger fires. That point is the tick on the bar.
+// Colours follow the TUI's thresholds on used/window: <50% · <75% · beyond.
+const Ctx = (() => {
+  const btn = $("st-ctx"), fill = btn.querySelector(".ctx-fill"), tick = btn.querySelector(".ctx-tick"), txt = btn.querySelector(".ctx-txt"), pop = $("ctx-pop");
+  // measured/estimate: token counts; budget/window from the assessment (window falls back to the view)
+  let c = { measured: null, measuredAt: 0, estimate: null, budget: null, window: null, shouldCompact: false };
+  let pending = 0, qTimer = 0, gen = 0;
+  const fmt = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(n % 1e6 ? 2 : 0)}M` : n >= 1e3 ? `${+(n / 1e3).toFixed(n >= 1e5 ? 0 : 1)}k` : String(Math.round(n)));
+  const used = () => c.measured ?? c.estimate;
+  const win = () => c.window || S.view?.context_window || 0;
+  // A new attach bumps `gen`: a query answer from an older socket (it can
+  // vanish mid-switch) is ignored, and `pending` can never wedge the meter.
+  function reset() { gen++; pending = 0; c = { measured: null, measuredAt: 0, estimate: null, budget: null, window: null, shouldCompact: false }; render(); }
+  // Ask the daemon for the assessment (debounced; one in flight at a time).
+  function refresh() {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => {
+      if (!S.sid || pending) return;
+      const sid = S.sid, g = gen;
+      pending = g;
+      const lost = setTimeout(() => { if (pending === g) pending = 0; }, 5000); // answer lost → allow retries
+      query({ query: "context_assessment" }, (v) => {
+        clearTimeout(lost);
+        if (pending === g) pending = 0;
+        if (g !== gen || sid !== S.sid || !v || typeof v.used_tokens !== "number") return;
+        c.estimate = v.used_tokens;
+        c.budget = v.budget_tokens;
+        c.window = v.provider_window || c.window;
+        c.shouldCompact = !!v.should_compact;
+        render();
+      });
+    }, 250);
+  }
+  function usage(s) {
+    const n = (s.input_tokens || 0) + (s.cache_read_input_tokens || 0) + (s.cache_creation_input_tokens || 0);
+    if (!n) return;
+    c.measured = n; c.measuredAt = Date.now();
+    render();
+  }
+  function stale() { c.measured = null; refresh(); } // history changed shape (compaction / clear)
+  function render() {
+    const u = used(), w = win();
+    btn.classList.toggle("hidden", !S.sid || u == null || !w);
+    if (!S.sid || u == null || !w) { closePop(); return; }
+    const ratio = Math.min(1, u / w);
+    btn.classList.remove("lo", "mid", "hi");
+    btn.classList.add(ratio < 0.5 ? "lo" : ratio < 0.75 ? "mid" : "hi");
+    btn.classList.toggle("compact", c.shouldCompact);
+    btn.classList.toggle("est", c.measured == null);
+    fill.style.transform = `scaleX(${ratio.toFixed(4)})`;
+    const b = c.budget;
+    tick.classList.toggle("hidden", b == null || b <= 0 || b >= w);
+    if (b != null && b > 0 && b < w) tick.style.left = `${((b / w) * 100).toFixed(2)}%`;
+    txt.textContent = `${fmt(u)} / ${fmt(w)}`;
+    const left = Math.max(0, w - u);
+    btn.title = "";
+    btn.setAttribute("aria-label", `Context: ${fmt(u)} of ${fmt(w)} used (${Math.round(ratio * 100)}%), ${fmt(left)} left${c.shouldCompact ? ", compaction advised" : ""}. Show details.`);
+    if (!pop.classList.contains("hidden")) fillPop();
+  }
+  function fillPop() {
+    const u = used(), w = win(), left = Math.max(0, w - u), b = c.budget;
+    const row = (k, v, cls = "") => `<div class="cp-row ${cls}"><span class="cp-k">${esc(k)}</span><span class="cp-v">${v}</span></div>`;
+    const pct = Math.round(Math.min(1, u / w) * 100);
+    let html = `<div class="cp-h">Context</div>`;
+    const estNote = c.measured != null && c.estimate != null && Math.abs(c.estimate - c.measured) >= 500 ? ` <span class="cp-dim">· daemon estimate ~${esc(fmt(c.estimate))}</span>` : "";
+    html += row("Used", `${esc(fmt(u))} <span class="cp-dim">of ${esc(fmt(w))} · ${pct}%</span>${estNote}`);
+    html += row("Left in window", esc(fmt(left)));
+    if (b != null) {
+      // Same basis as Synaps's trigger: its estimate vs its budget (never the
+      // measured count against the estimate-derived budget).
+      const e = c.estimate ?? u;
+      html += row("Reserved per request", `${esc(fmt(Math.max(0, w - b)))} <span class="cp-dim">output · thinking · next tool result · margin</span>`);
+      html += b > 0 && e <= b
+        ? row("Room before compaction", `${esc(fmt(b - e))} <span class="cp-dim">by the daemon's estimate</span>`)
+        : row("Compaction point", `${esc(fmt(Math.max(0, b)))} <span class="cp-dim">· passed by ${esc(fmt(Math.max(0, e - b)))}</span>`, "warn");
+    }
+    html += row("Compaction", c.shouldCompact ? "advised" : "not yet", c.shouldCompact ? "warn" : "");
+    const ago = c.measured != null ? Math.max(0, Math.round((Date.now() - c.measuredAt) / 1000)) : null;
+    html += `<div class="cp-foot">${c.measured != null ? `Measured on the last request${ago > 1 ? ` · ${ago < 60 ? `${ago}s` : `${Math.round(ago / 60)}m`} ago` : ""}` : "Estimated by the daemon · measured once the next request runs"}</div>`;
+    pop.innerHTML = html;
+  }
+  function openPop() { fillPop(); pop.classList.remove("hidden"); btn.setAttribute("aria-expanded", "true"); anim(pop, [{ opacity: 0, transform: "translateY(6px) scale(.98)" }, { opacity: 1, transform: "none" }], { duration: 220, easing: EASE.out }); }
+  function closePop() { if (pop.classList.contains("hidden")) return; pop.classList.add("hidden"); btn.setAttribute("aria-expanded", "false"); }
+  btn.onclick = (e) => { e.stopPropagation(); pop.classList.contains("hidden") ? openPop() : closePop(); };
+  document.addEventListener("click", (e) => { if (!pop.contains(e.target) && e.target !== btn) closePop(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePop(); });
+  return { reset, refresh, usage, stale, render, get state() { return { ...c, used: used(), window: win() }; } };
+})();
+window.__ctx = Ctx; // test hook
 function slideOpen(body) {
   const hgt = body.scrollHeight;
   return anim(body, [{ height: "0px", opacity: 0, overflow: "hidden" }, { height: `${hgt}px`, opacity: 1, overflow: "hidden" }], { duration: 260 });
@@ -1356,6 +1452,7 @@ function renderComposer() {
   window.__settings?.rerender();
   Glow.set(S.streaming); // idempotent — only acts when streaming flips
   RunState.render();
+  Ctx.render();
   const own = isOwner();
   $("watchbar").classList.toggle("hidden", own || !S.sid);
   if (!own && S.sid) $("watch-text").textContent = S.owner != null ? `Watching — ${who(S.owner)} is driving` : "Watching — nobody owns input";
@@ -1566,6 +1663,7 @@ function onAttached(a) {
   S.view = a.view || null;
   $("st-model").textContent = S.model.replace(/^.*\//, "");
   updateCost(a.conversation);
+  Ctx.reset(); Ctx.refresh(); // estimate now; measured once the next request reports Usage
   T.innerHTML = "";
   S.steers = [];
   // `replay` holds the LAST turn even after it finished — apply it only mid-turn,
@@ -1625,7 +1723,7 @@ function onEvent(e, ts) {
       S.streaming = false;
       for (const st of S.steers) if (st.state === "sending") { setSteer(st, "lost", ts); landSteer(st); }
       S.steers = S.steers.filter((st) => STEER_OPEN.includes(st.state));
-      finishAsst(); renderComposer(); return;
+      finishAsst(); renderComposer(); Ctx.refresh(); return;
     case "prompt": return showPrompt(e.request);
     case "prompt_resolved": if (S.prompt?.id === e.prompt_id) hidePrompt(); return;
     case "system_notice":
@@ -1662,7 +1760,7 @@ function onEvent(e, ts) {
       renderPresence(); renderComposer(); return;
     case "aborted": S.streaming = false; finishAsst(); addSys("turn stopped", "err"); renderComposer(); return;
     case "ended": addSys("session ended", "err"); S.sid = null; renderComposer(); return;
-    case "cleared": T.innerHTML = ""; S.steers = []; S.sid = e.session_id; emptyState("Fresh session", "The conversation was cleared."); return;
+    case "cleared": T.innerHTML = ""; S.steers = []; S.sid = e.session_id; emptyState("Fresh session", "The conversation was cleared."); Ctx.stale(); return;
     case "refused":
       if (e.client === S.me) {
         toast(`Refused: ${e.reason}`, "err", 5000);
@@ -1674,7 +1772,7 @@ function onEvent(e, ts) {
     case "query_result": { const cb = S.queries.get(e.id); if (cb) { S.queries.delete(e.id); cb(e.value); } return; }
     case "reloading": toast("Daemon reloading — reconnecting…"); return;
     case "compaction_started": S.compacting = true; RunState.render(); return addSys("compacting…");
-    case "compaction_applied": S.compacting = false; RunState.render(); return addSys(`compacted ${e.msg_count} messages`);
+    case "compaction_applied": S.compacting = false; RunState.render(); Ctx.stale(); return addSys(`compacted ${e.msg_count} messages`);
     case "compaction_failed": S.compacting = false; RunState.render(); return addSys(`compaction failed: ${e.message}`, "err");
     case "setting_changed": {
       const ap = e.applied || {};
@@ -1684,6 +1782,7 @@ function onEvent(e, ts) {
         const chip = $("model-chip").querySelector("span");
         if (chip) swapText(chip, `${S.model.replace(/^.*\//, "")} · ${ap.view.thinking_level ?? "?"}`);
         $("st-model").textContent = S.model.replace(/^.*\//, "");
+        Ctx.refresh(); // model / window may have changed → new budget
       }
       window.__settings?.applied(ap);
       return;
@@ -1706,7 +1805,7 @@ function onStream(s, ts) {
       case "tool_result": { const t = S.turnTools.get(s.tool_id); if (t) { const fail = toolFailure(s.result || ""); setToolOutput(t, s.result); toolDone(t, fail ? "err" : "ok", fail || undefined); } if (S.cur) S.cur.last = "tool"; return; }
     }
   } else if (s.kind === "session") {
-    if (s.session === "usage" && s.model) $("st-model").textContent = s.model.replace(/^.*\//, "");
+    if (s.session === "usage") { Ctx.usage(s); if (s.model) $("st-model").textContent = s.model.replace(/^.*\//, ""); }
     else if (s.session === "error") addSys(`error: ${s.message}`, "err");
     else if (s.session === "notice") addSys(s.text);
   } else if (s.kind === "agent") {
@@ -1744,6 +1843,12 @@ function doSend() {
   const input = $("input");
   const text = input.value.trim();
   if (!S.sid || !isOwner()) return;
+  // Mid-switch / reconnecting: the socket is closing, a send would be silently
+  // dropped (and the bubble + cleared box would say it went). Keep the text.
+  if (S.intentionalClose || S.ws?.readyState !== WebSocket.OPEN) {
+    if (text) toast("Switching sessions — your message is still in the box");
+    return;
+  }
   if (!text) { if (S.streaming) cmd({ cmd: "cancel" }); return; }
   T.querySelector(".empty")?.remove();
   if (S.streaming) { addSteer(text, "you", true, "sending"); cmd({ cmd: "steer", text }); }

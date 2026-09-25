@@ -313,6 +313,29 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
 .hints { display: flex; gap: 14px; justify-content: center; margin-top: 8px; font-size: 11px; color: color-mix(in oklab, var(--muted) 75%, transparent); pointer-events: none; }
 kbd { font: 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; border: 1px solid var(--line); background: color-mix(in oklab, var(--elem) 70%, transparent); color: var(--muted); }
 .statline { display: flex; gap: 12px; justify-content: center; font: 11px var(--mono); color: color-mix(in oklab, var(--muted) 80%, transparent); margin-top: 6px; pointer-events: none; }
+/* context meter — TUI thresholds: <50% primary · <75% warning · beyond error; tick = compaction point */
+.statline .ctx { pointer-events: auto; display: inline-flex; align-items: center; gap: 7px; padding: 2px 7px; margin: -2px -7px -2px 0; border-radius: 7px;
+  font: inherit; color: inherit; cursor: pointer; transition: background var(--fast), color var(--fast); }
+.statline .ctx:hover, .statline .ctx[aria-expanded="true"] { background: color-mix(in oklab, var(--elem) 85%, transparent); color: var(--text); }
+.ctx-bar { position: relative; width: 56px; height: 5px; border-radius: 999px; overflow: hidden; background: color-mix(in oklab, var(--text) 13%, transparent); }
+.ctx-fill { position: absolute; inset: 0; border-radius: inherit; transform-origin: 0 50%; transform: scaleX(0); background: var(--primary);
+  transition: transform 600ms var(--ease), background-color 300ms var(--ease); }
+.ctx.mid .ctx-fill { background: var(--warning); }
+.ctx.hi .ctx-fill { background: var(--error); }
+.ctx-tick { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--text); opacity: .75; }
+.ctx.est .ctx-txt::before { content: "~"; }
+.ctx.compact .ctx-txt { color: var(--warning); }
+#ctx-pop { position: absolute; left: 50%; bottom: 46px; z-index: 30; width: min(340px, calc(100vw - 32px)); margin-left: calc(min(340px, calc(100vw - 32px)) / -2);
+  pointer-events: auto; padding: 12px 14px 10px; border-radius: 14px; border: 1px solid var(--line);
+  background: color-mix(in oklab, var(--panel) 92%, transparent); backdrop-filter: blur(18px) saturate(140%);
+  box-shadow: 0 24px 60px -20px rgba(0,0,0,.7); font: 12.5px/1.5 var(--sans); color: var(--text); }
+.cp-h { font-weight: 650; margin-bottom: 6px; }
+.cp-row { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; padding: 3px 0; }
+.cp-k { color: var(--muted); white-space: nowrap; }
+.cp-v { font: 12px var(--mono); text-align: right; }
+.cp-dim { color: var(--muted); font-family: var(--sans); font-size: 11px; }
+.cp-row.warn .cp-v { color: var(--warning); }
+.cp-foot { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); font-size: 11px; color: var(--muted); }
 
 /* toasts */
 #toasts { position: fixed; right: 18px; bottom: 18px; z-index: 50; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
