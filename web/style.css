@@ -28,8 +28,10 @@
 
 :root {
   --fade: 1500ms;
-  --ease: cubic-bezier(.2, .8, .2, 1);
-  --fast: 140ms;
+  --ease: cubic-bezier(.16, 1, .3, 1);        /* expo-out: entrances, settles */
+  --ease-move: cubic-bezier(.65, 0, .35, 1);  /* in-out: things travelling across the layout */
+  --ease-pop: cubic-bezier(.34, 1.45, .64, 1); /* a hint of overshoot for pops */
+  --fast: 120ms; --med: 220ms; --slow: 380ms;
   --radius: 14px;
   --col: 820px;
   --rail: 272px;
@@ -116,17 +118,13 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
 .btn-new:active { transform: scale(.98); }
 .btn-new kbd { margin-left: auto; }
 .rail-label { padding: 12px 20px 6px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
-#sessions { list-style: none; margin: 0; padding: 0 8px; overflow-y: auto; flex: 1; scrollbar-width: thin; }
+#sessions { position: relative; list-style: none; margin: 0; padding: 0 8px; overflow-y: auto; flex: 1; scrollbar-width: thin; }
 #sessions li {
   position: relative; padding: 9px 12px 9px 14px; border-radius: 10px; cursor: pointer; margin-bottom: 2px;
   transition: background var(--fast);
 }
 #sessions li:hover { background: color-mix(in oklab, var(--elem) 70%, transparent); }
 #sessions li.active { background: color-mix(in oklab, var(--elem) 95%, transparent); }
-#sessions li.active::before {
-  content: ""; position: absolute; left: 3px; top: 10px; bottom: 10px; width: 3px; border-radius: 3px;
-  background: var(--primary); box-shadow: 0 0 10px var(--primary-glow);
-}
 .s-title { font-size: 13.5px; font-weight: 520; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .s-meta { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); margin-top: 1px; }
 .s-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border-subtle); }
@@ -173,7 +171,8 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
 /* thread */
 #scroller { flex: 1; overflow-y: auto; scroll-behavior: auto; scrollbar-width: thin; scrollbar-color: var(--border-dim) transparent; }
 #thread { max-width: var(--col); margin: 0 auto; padding: 76px 24px 200px; }
-.msg { margin: 0 0 22px; animation: enter 220ms var(--ease) both; content-visibility: auto; contain-intrinsic-size: auto 90px; }
+.msg { margin: 0 0 22px; animation: rise var(--med) var(--ease) both; content-visibility: auto; contain-intrinsic-size: auto 90px; }
+.msg.user { animation-name: from-right; animation-duration: 260ms; }
 @keyframes enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 .msg.user { display: flex; flex-direction: column; align-items: flex-end; }
@@ -457,3 +456,83 @@ kbd { font: 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; border: 1p
 .kchip { display: inline-flex; border-radius: 6px; overflow: hidden; border: 1px solid var(--line-soft); font: 11px/1 var(--mono); }
 .kchip .ck { padding: 3px 6px; color: var(--dim); background: color-mix(in oklab, var(--elem) 70%, transparent); }
 .kchip .cv { padding: 3px 7px; color: var(--text); }
+
+/* ══ motion ══════════════════════════════════════════════════════════════════ */
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes from-right { from { opacity: 0; transform: translate(14px, 4px) scale(.985); } to { opacity: 1; transform: none; } }
+@keyframes row-in { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: none; } }
+@keyframes steer-in { from { opacity: 0; transform: translateY(12px) scale(.98); filter: blur(3px); } to { opacity: 1; transform: none; filter: none; } }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+@keyframes shell-left { from { opacity: 0; transform: translateX(-14px); } }
+@keyframes shell-down { from { opacity: 0; transform: translateY(-8px); } }
+@keyframes shell-up { from { opacity: 0; transform: translateY(14px) scale(.99); } }
+@keyframes bar-in { from { opacity: 0; transform: translateY(6px); } }
+@keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+
+/* anything rendered from history/replay stays put */
+.static { animation: none !important; }
+
+/* activity rows slide off the rail */
+.row-in { animation: row-in 240ms var(--ease) both; }
+.activity.row-in { animation-name: rise; }
+
+/* ✓ / ✗ draw themselves */
+.i.draw path { stroke-dasharray: 26; stroke-dashoffset: 26; animation: draw 360ms var(--ease) 40ms forwards; }
+
+/* steers: slide up out of the composer; the landing flight is JS (FLIP) */
+.msg.user.steer.pending { animation: steer-in 280ms var(--ease) both; }
+
+/* send ↔ stop: both icons stacked, morph by rotate + scale + fade */
+#send { position: relative; transition: transform var(--fast) var(--ease), opacity var(--fast), background 260ms var(--ease), box-shadow 260ms var(--ease); }
+#send .i { grid-area: 1 / 1; transition: transform 260ms var(--ease), opacity 180ms var(--ease); }
+#send .ico-stop { opacity: 0; transform: rotate(90deg) scale(.5); }
+#send.stop .ico-send { opacity: 0; transform: rotate(-90deg) scale(.5); }
+#send.stop .ico-stop { opacity: 1; transform: none; }
+
+/* composer grows smoothly */
+#input { transition: height 140ms var(--ease); }
+
+/* session rail: one indicator glides to the active row */
+.rail-ind {
+  position: absolute; left: 8px; right: 8px; top: 0; height: 0; z-index: 0; pointer-events: none; opacity: 0;
+  border-radius: 10px; background: color-mix(in oklab, var(--elem) 95%, transparent);
+  transition: transform var(--slow) var(--ease-move), height var(--slow) var(--ease-move), opacity var(--med);
+}
+.rail-ind::before { content: ""; position: absolute; left: 3px; top: 10px; bottom: 10px; width: 3px; border-radius: 3px; background: var(--primary); box-shadow: 0 0 10px var(--primary-glow); }
+#sessions li { position: relative; z-index: 1; transition: background var(--fast); }
+#sessions li.active { background: transparent; }
+
+/* presence crown drops in */
+.av.owner::after { animation: rise 300ms var(--ease-pop) both; }
+
+/* toasts spring in from the right */
+.toast { animation: toast-spring 380ms var(--ease-pop) both; }
+@keyframes toast-spring { from { opacity: 0; transform: translateX(28px) scale(.96); } to { opacity: 1; transform: none; } }
+
+/* prompt sheet */
+#modal:not(.hidden) { animation: fade 180ms var(--ease) both; }
+#modal:not(.hidden) .sheet { animation: sheet-in 300ms var(--ease-pop) both; }
+@keyframes sheet-in { from { opacity: 0; transform: translateY(10px) scale(.96); } to { opacity: 1; transform: none; } }
+
+/* watch bar, jump pill, copy */
+.watchbar:not(.hidden) { animation: bar-in var(--med) var(--ease) both; }
+#jump { transition: opacity var(--med) var(--ease), transform var(--med) var(--ease); }
+.copy { transition: background var(--fast), color var(--fast), transform var(--fast) var(--ease); }
+.copy:active { transform: scale(.94); }
+.copy.done .i { animation: rise 260ms var(--ease-pop); }
+
+/* buttons + rows: tactile press */
+.btn-new:active, .btn-ghost:active, .icon-btn:active, .btn-primary:active { transform: scale(.96); }
+.btn-ghost, .icon-btn, .btn-primary { transition: background var(--fast), border-color var(--fast), color var(--fast), transform var(--fast) var(--ease); }
+.tool-head:active, .act-head:active, .think > summary:active { transform: scale(.995); }
+
+/* app shell arrives once */
+#rail { animation: shell-left 480ms var(--ease) both; }
+#top { animation: shell-down 420ms var(--ease) 80ms both; }
+#composer { animation: shell-up 480ms var(--ease) 140ms both; }
+.empty .glyph { animation: float 6s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .i.draw path { stroke-dashoffset: 0; }
+}

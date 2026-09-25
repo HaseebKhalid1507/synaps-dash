@@ -57,6 +57,55 @@ const S = {
 const T = $("thread");
 const SC = $("scroller");
 
+// ── motion ────────────────────────────────────────────────────────────────────
+// One vocabulary (mirrors the CSS tokens). transform/opacity only, plus height
+// for expand/collapse. Everything is skipped under prefers-reduced-motion.
+const RM = matchMedia("(prefers-reduced-motion: reduce)");
+const motion = () => !RM.matches;
+const EASE = { out: "cubic-bezier(.16,1,.3,1)", move: "cubic-bezier(.65,0,.35,1)", pop: "cubic-bezier(.34,1.45,.64,1)" };
+function anim(el, frames, opts = {}) {
+  if (!el || !el.animate || !motion()) return null;
+  return el.animate(frames, { duration: 220, easing: EASE.out, ...opts });
+}
+function slideOpen(body) {
+  const hgt = body.scrollHeight;
+  return anim(body, [{ height: "0px", opacity: 0, overflow: "hidden" }, { height: `${hgt}px`, opacity: 1, overflow: "hidden" }], { duration: 260 });
+}
+function slideClose(body, done) {
+  const a = anim(body, [{ height: `${body.offsetHeight}px`, opacity: 1, overflow: "hidden" }, { height: "0px", opacity: 0, overflow: "hidden" }], { duration: 180, easing: EASE.move });
+  if (a) a.onfinish = done; else done();
+}
+// <details> (batches, thoughts) animate BOTH ways: intercept the toggle click.
+document.addEventListener("click", (ev) => {
+  const sum = ev.target.closest("summary");
+  const d = sum?.parentElement;
+  if (!d || !d.matches("details.activity, details.think") || d.classList.contains("single")) return;
+  const body = d.querySelector(":scope > .act-body, :scope > .think-body");
+  if (!body || !motion()) return;
+  ev.preventDefault();
+  if (d._busy) return;
+  d._busy = true;
+  if (d.open) slideClose(body, () => { d.open = false; d._busy = false; });
+  else { d.open = true; const a = slideOpen(body); if (a) a.onfinish = () => { d._busy = false; }; else d._busy = false; }
+});
+function toggleTool(card) {
+  const body = card.querySelector(".tool-body");
+  if (card._busy) return;
+  if (card.classList.contains("open")) {
+    card._busy = true;
+    slideClose(body, () => { card.classList.remove("open"); card._busy = false; });
+  } else {
+    card.classList.add("open");
+    slideOpen(body);
+  }
+}
+// cross-fade a label when its text actually changes
+function swapText(el, text) {
+  if (el.textContent === text) return;
+  el.textContent = text;
+  if (!S.replaying) anim(el, [{ opacity: 0.25, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 180 });
+}
+
 // ── MXC palette ───────────────────────────────────────────────────────────────
 const MXC_VARS = {
   background: "--bg", background_panel: "--panel", background_element: "--elem", text: "--text", text_muted: "--muted",
@@ -175,6 +224,7 @@ $("jump").onclick = () => { SC.scrollTo({ top: SC.scrollHeight, behavior: "smoot
 const trayEl = () => { const t = document.getElementById("steer-tray"); return t && t.parentNode === T ? t : null; };
 function tray() { let t = trayEl(); if (!t) { t = h("div"); t.id = "steer-tray"; T.append(t); } return t; }
 const add = (node, parent = T) => {
+  if (S.replaying && node.classList) node.classList.add("static");
   if (parent === T) T.insertBefore(node, trayEl()); else parent.append(node);
   follow();
   return node;
@@ -258,8 +308,12 @@ const findSteer = (text, states = STEER_OPEN) => S.steers.find((x) => x.text ===
 function landSteer(st) {
   if (!st || !st.m.classList.contains("pending")) return;
   splitAsst();
+  const first = st.m.getBoundingClientRect();
   st.m.classList.remove("pending");
   T.insertBefore(st.m, trayEl());
+  const last = st.m.getBoundingClientRect();
+  const dx = first.left - last.left, dy = first.top - last.top;
+  if (Math.abs(dy) > 2 || Math.abs(dx) > 2) anim(st.m, [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], { duration: 440, easing: EASE.move });
   st.m.classList.add("landed");
   setTimeout(() => st.m.classList.remove("landed"), 1400);
   follow();
@@ -289,6 +343,7 @@ function groupFor(c) {
   if (c.group && (c.last === "think" || c.last === "tool")) return c.group;
   const el = h("details", "activity single");
   el.innerHTML = `<summary class="act-head"><span class="act-ico">${svg("layers")}</span><span class="act-lbl"></span><span class="act-st"></span>${svg("chev", "i chev")}</summary><div class="act-body"></div>`;
+  if (!S.replaying) el.classList.add("row-in");
   add(el, c.body);
   c.group = { el, body: el.querySelector(".act-body"), lbl: el.querySelector(".act-lbl"), st: el.querySelector(".act-st"), items: [], start: S.replaying ? 0 : performance.now() };
   return c.group;
@@ -314,15 +369,23 @@ function updateGroup(g) {
   for (const [k, n] of counts) { const [one, many] = CAT[k] || CAT.wrench; parts.push(`${n} ${n === 1 ? one : many}`); }
   if (running && !S.replaying) {
     const cur = running.kind === "think" ? "Thinking…" : `${(CAT[toolIcon(running.t.name)] || CAT.wrench)[2]} ${running.t.sum.textContent || running.t.name}`;
-    g.lbl.innerHTML = "";
-    g.lbl.append(h("span", "act-now", cur), h("span", "act-meta", ` · ${items.length} steps`));
-    g.st.innerHTML = '<span class="spinner"></span>';
+    const key = `${cur}|${items.length}`;
+    if (g.lbl._key !== key) {
+      const changedStep = (g.lbl._cur ?? cur) !== cur;
+      g.lbl._key = key; g.lbl._cur = cur;
+      g.lbl.innerHTML = "";
+      g.lbl.append(h("span", "act-now", cur), h("span", "act-meta", ` · ${items.length} steps`));
+      if (changedStep && !S.replaying) anim(g.lbl, [{ opacity: 0.2, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], { duration: 200 });
+    }
+    if (g.st._html !== "spin") { g.st._html = "spin"; g.st.innerHTML = '<span class="spinner"></span>'; }
     g.el.classList.add("live");
   } else {
-    g.lbl.textContent = parts.join(" · ");
+    g.lbl._key = null;
+    swapText(g.lbl, parts.join(" · "));
     const secs = g.start ? (performance.now() - g.start) / 1000 : 0;
     const took = g.start ? (secs < 10 ? `${secs.toFixed(1)}s` : `${Math.round(secs)}s`) : "";
-    g.st.innerHTML = errs ? `<span>${errs} failed</span>${svg("x")}` : `<span>${took}</span>${svg("check")}`;
+    const html = errs ? `<span>${errs} failed</span>${svg("x", "i draw")}` : `<span>${took}</span>${svg("check", S.replaying ? "i" : "i draw")}`;
+    if (g.st._html !== (errs ? `e${errs}` : "ok")) { g.st._html = errs ? `e${errs}` : "ok"; g.st.innerHTML = html; }
     g.el.classList.toggle("has-err", errs > 0);
     g.el.classList.remove("live");
   }
@@ -372,6 +435,7 @@ function appendThinking(text) {
     const d = h("details", "think active");
     d.innerHTML = `<summary>${svg("brain")}<span class="lbl">Thinking…</span><span class="think-sum"></span><span class="think-st"></span>${svg("chev", "i chev")}</summary><div class="think-body"></div>`;
     c.think = d; c.thinkRaw = ""; c.thinkStart = performance.now();
+    if (!S.replaying) d.classList.add("row-in");
     const g = groupFor(c);
     add(d, g.body);
     d._item = { kind: "think", el: d, secs: 0 };
@@ -458,7 +522,8 @@ function toolCard(id, name, input) {
   const card = h("div", "tool");
   card.innerHTML = `<button class="tool-head"><span class="tool-ico">${svg(toolIcon(name))}</span><span class="tool-name"></span><span class="tool-sum"></span><span class="tool-st"><span class="spinner"></span></span>${svg("chev", "i chev")}</button><div class="tool-body"><div class="tool-sec in"><div class="lbl">Input</div><div class="in-view"></div></div><div class="tool-sec out ${/bash|shell|exec/.test(name) ? "term" : ""} hidden"><div class="lbl">Output</div><pre></pre></div></div>`;
   card.querySelector(".tool-name").textContent = name || "tool";
-  card.querySelector(".tool-head").onclick = () => card.classList.toggle("open");
+  card.querySelector(".tool-head").onclick = () => toggleTool(card);
+  if (!S.replaying) card.classList.add("row-in");
   const g = groupFor(c);
   add(card, g.body);
   const t = { card, name, start: performance.now(), inRaw: "", outRaw: "", done: false,
@@ -522,7 +587,7 @@ function toolDone(t, cls = "ok", label) {
   t.card.classList.add(cls);
   const ms = performance.now() - t.start;
   const dur = ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
-  t.st.innerHTML = `<span>${label || (S.replaying ? "" : dur)}</span>${svg(cls === "ok" ? "check" : "x")}`;
+  t.st.innerHTML = `<span>${label || (S.replaying ? "" : dur)}</span>${svg(cls === "ok" ? "check" : "x", S.replaying ? "i" : "i draw")}`;
   updateGroup(t.group);
 }
 
@@ -554,13 +619,27 @@ function setConn(state, text) { $("conn").className = state; $("conn-text").text
 const isOwner = () => S.me != null && S.owner === S.me;
 function renderPresence() {
   const box = $("presence");
-  box.innerHTML = "";
-  for (const [cid, kind] of [...S.clients].sort((a, b) => a[0] - b[0])) {
-    const a = h("div", "av", kindLabel(kind).slice(0, 1).toUpperCase());
+  const have = new Map([...box.children].filter((x) => !x._leaving).map((x) => [x._cid, x]));
+  const want = [...S.clients].sort((a, b) => a[0] - b[0]);
+  for (const [cid, el] of have) {
+    if (S.clients.has(cid)) continue;
+    el._leaving = true;
+    const a = anim(el, [{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: "scale(.4)" }], { duration: 180, easing: EASE.move });
+    if (a) a.onfinish = () => el.remove(); else el.remove();
+  }
+  let prev = null;
+  for (const [cid, kind] of want) {
+    let a = have.get(cid);
+    if (!a) {
+      a = h("div", "av", kindLabel(kind).slice(0, 1).toUpperCase());
+      a._cid = cid;
+      anim(a, [{ opacity: 0, transform: "scale(.4)" }, { opacity: 1, transform: "scale(1)" }], { duration: 320, easing: EASE.pop });
+    }
     a.title = who(cid) + (cid === S.owner ? " — owns input" : "");
-    if (cid === S.me) a.classList.add("me");
-    if (cid === S.owner) a.classList.add("owner");
-    box.append(a);
+    a.classList.toggle("me", cid === S.me);
+    a.classList.toggle("owner", cid === S.owner);
+    if (prev ? prev.nextSibling !== a : box.firstChild !== a) box.insertBefore(a, prev ? prev.nextSibling : box.firstChild);
+    prev = a;
   }
 }
 function renderComposer() {
@@ -572,8 +651,6 @@ function renderComposer() {
   const send = $("send");
   const stop = own && S.streaming && !$("input").value.trim();
   send.classList.toggle("stop", stop);
-  send.querySelector(".ico-send").classList.toggle("hidden", stop);
-  send.querySelector(".ico-stop").classList.toggle("hidden", !stop);
   send.title = stop ? "Stop (Esc)" : S.streaming ? "Steer (Enter)" : "Send (Enter)";
   send.disabled = !own;
 }
@@ -586,24 +663,49 @@ function ago(iso) {
 }
 function renderSessions() {
   const ul = $("sessions");
-  ul.innerHTML = "";
-  if (!S.sessions.length) { ul.append(h("li", "rail-empty", "No sessions yet — start one here or in the TUI.")); return; }
-  for (const s of [...S.sessions].sort((a, b) => (a.created_at < b.created_at ? 1 : -1))) {
-    const li = h("li");
-    if (s.id === S.sid) li.classList.add("active");
-    li.append(h("div", "s-title", s.name || (s.id === S.sid && S.title) || s.id));
-    const meta = h("div", "s-meta");
-    const dot = h("span", `s-dot ${s.clients > 0 ? "live" : ""}`);
-    meta.append(dot, `${(s.model || "").replace(/^.*\//, "")} · ${s.clients} · ${ago(s.created_at)}`);
-    li.append(meta);
-    li.onclick = () => { if (s.id !== S.sid) switchTo(s.id, "mirror"); if (innerWidth < 860) $("app").classList.remove("rail-open"); };
-    ul.append(li);
+  let ind = ul.querySelector(":scope > .rail-ind");
+  if (!ind) { ind = h("div", "rail-ind"); ul.prepend(ind); }
+  ul.querySelector(":scope > .rail-empty")?.remove();
+  const rows = new Map([...ul.querySelectorAll(":scope > li[data-id]")].map((li) => [li.dataset.id, li]));
+  const list = [...S.sessions].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  for (const [id, li] of rows) if (!list.some((s) => s.id === id)) {
+    const a = anim(li, [{ opacity: 1 }, { opacity: 0, transform: "translateX(-8px)" }], { duration: 160 });
+    rows.delete(id);
+    if (a) a.onfinish = () => li.remove(); else li.remove();
   }
+  if (!list.length) { ul.append(h("li", "rail-empty", "No sessions yet — start one here or in the TUI.")); ind.style.opacity = "0"; return; }
+  let prev = ind;
+  for (const s of list) {
+    let li = rows.get(s.id);
+    if (!li) {
+      li = h("li");
+      li.dataset.id = s.id;
+      li.innerHTML = '<div class="s-title"></div><div class="s-meta"><span class="s-dot"></span><span class="s-txt"></span></div>';
+      li.onclick = () => { if (s.id !== S.sid) switchTo(s.id, "mirror"); if (innerWidth < 860) $("app").classList.remove("rail-open"); };
+      if (ul._ready) anim(li, [{ opacity: 0, transform: "translateX(-10px)" }, { opacity: 1, transform: "none" }], { duration: 260 });
+    }
+    li.classList.toggle("active", s.id === S.sid);
+    const title = s.name || (s.id === S.sid && S.title) || s.id;
+    if (li.firstChild.textContent !== title) li.firstChild.textContent = title;
+    li.querySelector(".s-dot").classList.toggle("live", s.clients > 0);
+    const meta = `${(s.model || "").replace(/^.*\//, "")} · ${s.clients} · ${ago(s.created_at)}`;
+    const txt = li.querySelector(".s-txt");
+    if (txt.textContent !== meta) txt.textContent = meta;
+    if (prev.nextSibling !== li) ul.insertBefore(li, prev.nextSibling);
+    prev = li;
+  }
+  ul._ready = true;
+  const act = ul.querySelector(":scope > li.active");
+  if (act) { ind.style.opacity = "1"; ind.style.transform = `translateY(${act.offsetTop}px)`; ind.style.height = `${act.offsetHeight}px`; }
+  else ind.style.opacity = "0";
 }
 function toast(msg, cls = "", ms = 3600) {
   const t = h("div", `toast ${cls}`, msg);
   $("toasts").append(t);
-  setTimeout(() => { t.classList.add("out"); setTimeout(() => t.remove(), 180); }, ms);
+  setTimeout(() => {
+    const a = anim(t, [{ opacity: 1, transform: "none", height: `${t.offsetHeight}px` }, { opacity: 0, transform: "translateX(16px)", height: "0px", paddingTop: "0px", paddingBottom: "0px", marginTop: "-8px" }], { duration: 240, easing: EASE.move });
+    if (a) a.onfinish = () => t.remove(); else t.remove();
+  }, ms);
 }
 const fmtTok = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 function updateCost(c) {
@@ -643,6 +745,7 @@ function connect() {
   };
 }
 function switchTo(sid, mode, create = false) {
+  S.threadFade = anim(T, [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-6px)" }], { duration: 140, easing: EASE.move, fill: "forwards" });
   S.wantSid = sid; S.wantMode = mode; S.wantCreate = create;
   S.intentionalClose = true;
   S.ws?.close();
@@ -701,6 +804,8 @@ function onAttached(a) {
   const ts0 = replay.find((env) => env.event.ev === "turn_started")?.event;
   renderTail(a.display_tail, !!ts0 && (ts0.trigger === "user" || ts0.trigger === "plugin_command"));
   if (!T.children.length) emptyState(S.title || "New session", "Say something — every client on this session sees it live.");
+  S.threadFade?.cancel(); S.threadFade = null;
+  anim(T, [{ opacity: 0, transform: "translateY(8px)" }, { opacity: 1, transform: "none" }], { duration: 320 });
   S.replaying = true;
   for (const env of replay) onEvent(env.event, env.ts);
   S.replaying = false;
@@ -838,7 +943,13 @@ function showPrompt(p) {
   $("modal").classList.remove("hidden");
   (secret ? $("modal-secret") : $("modal-yes")).focus();
 }
-function hidePrompt() { S.prompt = null; $("modal").classList.add("hidden"); }
+function hidePrompt() {
+  S.prompt = null;
+  const m = $("modal");
+  const a = anim(m, [{ opacity: 1 }, { opacity: 0 }], { duration: 150, easing: EASE.move });
+  anim(m.querySelector(".sheet"), [{ transform: "none" }, { transform: "translateY(6px) scale(.97)" }], { duration: 150, easing: EASE.move });
+  if (a) a.onfinish = () => { if (!S.prompt) m.classList.add("hidden"); }; else m.classList.add("hidden");
+}
 function answer(value) { if (!S.prompt) return; cmd({ cmd: "answer", prompt_id: S.prompt.id, value }); hidePrompt(); }
 $("modal-yes").onclick = () => answer(S.prompt?.kind === "secret" ? $("modal-secret").value : "y");
 $("modal-no").onclick = () => answer(S.prompt?.kind === "secret" ? null : "n");
@@ -855,7 +966,15 @@ function doSend() {
   S.atBottom = true; follow();
   input.value = ""; autosize(); renderComposer();
 }
-function autosize() { const i = $("input"); i.style.height = "auto"; i.style.height = Math.min(240, i.scrollHeight) + "px"; }
+function autosize() {
+  const i = $("input");
+  const old = i.offsetHeight;
+  i.style.height = "auto";
+  const target = Math.min(240, i.scrollHeight);
+  i.style.height = `${old}px`;
+  void i.offsetHeight; // commit the start height so the CSS transition runs
+  i.style.height = `${target}px`;
+}
 $("input").addEventListener("input", () => { autosize(); renderComposer(); });
 $("input").addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); doSend(); } });
 $("send").onclick = doSend;
