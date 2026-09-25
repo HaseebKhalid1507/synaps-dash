@@ -17,7 +17,7 @@ import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const log = (...a: unknown[]) => process.stderr.write(`[synaps-dash] ${a.map(String).join(" ")}\n`);
 
 // ── extension JSON-RPC over stdio (Content-Length framing, LSP-style) ─────────
@@ -151,8 +151,14 @@ function daemonCwd(): string {
 
 // ── client-frame filter (browser → daemon) ────────────────────────────────────
 
+// Session settings the browser may change (mirrors the TUI /settings session
+// rows). NOT system_prompt / reload_prompt / grant_worker_model.
+const ALLOWED_SETTINGS = new Set([
+  "model", "reasoning_level", "context_window", "compaction_model", "api_retries",
+  "subagent_timeout", "max_tool_output", "bash_timeout", "bash_max_timeout",
+]);
 const ALLOWED_CMDS = new Set([
-  "submit", "steer", "cancel", "answer", "query", "save", "compact", "new_session", "engine_command", "detach",
+  "submit", "set", "steer", "cancel", "answer", "query", "save", "compact", "new_session", "engine_command", "detach",
 ]);
 const MODES = new Set(["mirror", "observe", "takeover"]);
 
@@ -183,6 +189,7 @@ function filterFrame(f: any): Verdict {
     }
     case "cmd": {
       const name = f.cmd?.cmd;
+      if (name === "set" && !ALLOWED_SETTINGS.has(f.cmd?.setting?.setting)) return { ok: false, why: `setting '${f.cmd?.setting?.setting}' not allowed from the web` };
       if (typeof f.session_id !== "string" || !ALLOWED_CMDS.has(name)) return { ok: false, why: `cmd '${name}' not allowed` };
       return { ok: true, frame: { type: "cmd", session_id: f.session_id, cmd: f.cmd } };
     }
@@ -383,6 +390,26 @@ async function startServer() {
             data: { id: nextConn++, uds: null, pending: [], outBuf: Buffer.alloc(0), inBuf: "", dec: new TextDecoder(), ready: false },
           });
           return ok ? undefined : new Response("upgrade failed\n", { status: 400 });
+        }
+        if (url.pathname === "/api/models") {
+          // Favorites + default model from the Synaps config of OUR daemon's
+          // profile. Reads ONLY `model` and `favorite_models` — the config also
+          // holds provider keys, which never leave this process.
+          const d = hostDaemon();
+          const base = process.env.SYNAPS_BASE_DIR || join(homedir(), ".synaps-cli");
+          const files = d?.profile ? [join(base, d.profile, "config"), join(base, "config")] : [join(base, "config")];
+          let model: string | null = null, favorites: string[] = [];
+          for (const f of files) {
+            let text = "";
+            try { text = readFileSync(f, "utf8"); } catch { continue; }
+            for (const line of text.split("\n")) {
+              const m = /^\s*(model|favorite_models)\s*=\s*(.*?)\s*$/.exec(line);
+              if (!m) continue;
+              if (m[1] === "model" && !model) model = m[2];
+              if (m[1] === "favorite_models" && !favorites.length) favorites = m[2].split(",").map((x) => x.trim()).filter((x) => /^[\w.-]+\/[\w.:-]+$/.test(x));
+            }
+          }
+          return Response.json({ model, favorites });
         }
         if (url.pathname === "/api/info") {
           try {

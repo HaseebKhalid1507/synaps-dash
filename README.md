@@ -42,6 +42,19 @@ daemon ──spawns──▶ synaps-dash (this extension) ◀── HTTP/WS 127.
   "New messages" pill, `End` or sending a message re-pins it. Navigation keys scroll the
   transcript whenever you're not typing.
 - **Markdown** with tables, links, blockquotes and highlighted code blocks with copy.
+- **Settings** (gear bottom-left, or `Ctrl+,`), modelled on the TUI's `/settings`:
+  - **Session:** model (your config's `favorite_models` + custom), thinking level, context
+    window, and advanced tool limits and retries. Applied live to the session through the
+    daemon (owner-only, each confirmed with a ✓).
+  - **Appearance:** palette (Album live / Myx / Midnight / Ember / Mono), text size, density,
+    glow, grain.
+  - **Motion:** animations System / Full / Reduced, and the stream-smoothing slider.
+  - **Behavior:** stick to bottom, send with Enter or Ctrl/⌘+Enter.
+  - **About:** connection and version details.
+
+  The browser can change only the 9 session settings the TUI's `/settings` exposes. It
+  cannot change the system prompt or worker-model grants, and it never touches the
+  daemon's config file.
 
 ## Install (on your main daemon)
 
@@ -78,7 +91,10 @@ The daemon trusts its uid (0600 socket), so **this process is the boundary**:
 - WebSocket upgrade needs the cookie and a loopback or same-origin `Origin`
 - the bridge does the protocol `hello` itself. The browser may only send `ping`,
   `sessions`, `attach`, `cmd` and `bye`
-- `cmd` allowlist: submit steer cancel answer query save compact new_session engine_command detach
+- `cmd` allowlist: submit set steer cancel answer query save compact new_session engine_command detach;
+  `set` only for model, reasoning_level, context_window, compaction_model, api_retries,
+  subagent_timeout, max_tool_output, bash_timeout, bash_max_timeout
+- `/api/models` returns only `model` + `favorite_models` from the Synaps config (never keys)
 - `attach create` config is sanitised (no `prompt_manifest`/`env`; `auto_approve_confirms=false`)
 - `shutdown` / `reload` / `purge` / `hello` / `end` are refused
 - serves only when hosted by a registered daemon (its `daemon*.json` pid == our ppid).
@@ -108,6 +124,7 @@ The tests are Playwright scripts that drive real turns against the sandbox:
 | `test/scroll-pin.cjs` | stick-to-bottom by intent, unpin/re-pin gestures |
 | `test/stream-probe.cjs` | streaming smoothness: wire cadence vs per-frame reveal |
 | `test/shot-activity.cjs` | screenshot of an expanded activity batch |
+| `test/settings.cjs` | settings panel: every control, session settings via the daemon, persistence, watcher read-only, unsafe-setting refusal |
 | `test/probe.ts` | raw protocol through the bridge + frame-filter refusals |
 
 ## Protocol notes (verified on SynapsCLI 0.9.1, protocol v3)

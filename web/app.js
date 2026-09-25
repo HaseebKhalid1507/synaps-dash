@@ -57,11 +57,25 @@ const S = {
 const T = $("thread");
 const SC = $("scroller");
 
+// ── client preferences (this browser) ─────────────────────────────────────────
+const PREF_DEFAULTS = { palette: "album", fontSize: "m", density: "comfy", glow: true, grain: true, motion: "system", lag: 256, autoscroll: true, sendKey: "enter" };
+const PREFS = (() => {
+  let p = {};
+  try { p = JSON.parse(localStorage.getItem("sd.prefs") || "{}"); } catch {}
+  const legacy = localStorage.getItem("sd.revealLag"); // pre-settings ?lag value
+  if (p.lag == null && legacy !== null && Number.isFinite(Number(legacy))) p.lag = Number(legacy);
+  const q = new URLSearchParams(location.search);
+  if (q.has("lag") && Number(q.get("lag")) >= 0 && Number(q.get("lag")) <= 2000) p.lag = Number(q.get("lag"));
+  return { ...PREF_DEFAULTS, ...p };
+})();
+function savePrefs() { localStorage.setItem("sd.prefs", JSON.stringify(PREFS)); }
+savePrefs();
+
 // ── motion ────────────────────────────────────────────────────────────────────
 // One vocabulary (mirrors the CSS tokens). transform/opacity only, plus height
 // for expand/collapse. Everything is skipped under prefers-reduced-motion.
 const RM = matchMedia("(prefers-reduced-motion: reduce)");
-const motion = () => !RM.matches;
+const motion = () => (PREFS.motion === "full" ? true : PREFS.motion === "reduced" ? false : !RM.matches);
 const EASE = { out: "cubic-bezier(.16,1,.3,1)", move: "cubic-bezier(.65,0,.35,1)", pop: "cubic-bezier(.34,1.45,.64,1)" };
 function anim(el, frames, opts = {}) {
   if (!el || !el.animate || !motion()) return null;
@@ -113,7 +127,7 @@ const MXC_VARS = {
   success: "--success", info: "--info", border: "--border", border_active: "--border-active",
   border_subtle: "--border-subtle", border_dimmest: "--border-dim",
 };
-function applyPalette(p) {
+function applyPalette(p, label) {
   const root = document.documentElement.style;
   if (p && p.colors) {
     root.setProperty("--fade", `${Math.max(0, Number(p.fade_ms) || 600)}ms`);
@@ -128,7 +142,7 @@ function applyPalette(p) {
     s.style.background = `var(${MXC_VARS[k]})`;
     sw.append(s);
   }
-  sw.append(h("span", "lbl", p ? "♪ album palette" : "myx default"));
+  sw.append(h("span", "lbl", label || (p ? "♪ album palette" : "myx default")));
 }
 
 // ── markdown (escape first, then safe transforms) ─────────────────────────────
@@ -245,17 +259,17 @@ SC.addEventListener("scroll", () => {
 }, { passive: true });
 // Growth anywhere in the thread (or a viewport resize) keeps a pinned view glued.
 new ResizeObserver(() => {
-  if (S.pinned) stick();
+  if (S.pinned && PREFS.autoscroll) stick();
   else if (S.streaming) $("jump").classList.add("show");
 }).observe(T);
-new ResizeObserver(() => { if (S.pinned) stick(); }).observe(SC);
+new ResizeObserver(() => { if (S.pinned && PREFS.autoscroll) stick(); }).observe(SC);
 let followQueued = false;
 function follow() {
   if (followQueued) return;
   followQueued = true;
   requestAnimationFrame(() => {
     followQueued = false;
-    if (S.pinned) stick();
+    if (S.pinned && PREFS.autoscroll) stick();
     else if (S.streaming) $("jump").classList.add("show");
   });
 }
@@ -499,14 +513,9 @@ function appendThinking(text) {
 // backlog/REVEAL_LAG_MS worth each frame: ~3 chars EVERY frame, trailing the
 // wire by ~140ms, catching up faster after a burst. When a block ends, the rest
 // drains within a few frames. Replay and reduced-motion render instantly.
-// Default 256ms: long enough to glide over the model's own mid-sentence pauses
-// (170–340ms at the source). Compare live with /?lag=140 (remembered).
-const REVEAL_LAG_MS = (() => {
-  const q = Number(new URLSearchParams(location.search).get("lag"));
-  if (q >= 0 && q <= 2000 && new URLSearchParams(location.search).has("lag")) localStorage.setItem("sd.revealLag", String(q));
-  const v = Number(localStorage.getItem("sd.revealLag"));
-  return Number.isFinite(v) && localStorage.getItem("sd.revealLag") !== null ? v : 256;
-})();
+// Stream smoothing buffer (Settings → Motion; `?lag=N` also sets it). Default 256ms
+// glides over the model's own mid-sentence pauses (170–340ms at the source).
+let REVEAL_LAG_MS = PREFS.lag;
 const typers = new Set();
 let typerRaf = 0;
 function markDirty(n) {
@@ -735,6 +744,7 @@ function renderPresence() {
   }
 }
 function renderComposer() {
+  window.__settings?.rerender();
   const own = isOwner();
   $("watchbar").classList.toggle("hidden", own || !S.sid);
   if (!own && S.sid) $("watch-text").textContent = S.owner != null ? `Watching — ${who(S.owner)} is driving` : "Watching — nobody owns input";
@@ -845,7 +855,7 @@ function switchTo(sid, mode, create = false) {
 
 function onFrame(f) {
   switch (f.type) {
-    case "mxc": return applyPalette(f.palette);
+    case "mxc": S.album = f.palette; return applyTheme();
     case "welcome": return onWelcome(f);
     case "refused": setConn("down", "refused"); toast(f.message, "err", 8000); return;
     case "session_list": S.sessions = f.sessions; renderSessions(); return;
@@ -886,6 +896,7 @@ function onAttached(a) {
   chip.innerHTML = `${svg("cpu")}<span></span>`;
   chip.querySelector("span").textContent = `${S.model.replace(/^.*\//, "")} · ${a.view?.thinking_level ?? "?"}`;
   chip.classList.remove("hidden");
+  S.view = a.view || null;
   $("st-model").textContent = S.model.replace(/^.*\//, "");
   updateCost(a.conversation);
   T.innerHTML = "";
@@ -995,6 +1006,18 @@ function onEvent(e, ts) {
     case "compaction_started": return addSys("compacting…");
     case "compaction_applied": return addSys(`compacted ${e.msg_count} messages`);
     case "compaction_failed": return addSys(`compaction failed: ${e.message}`, "err");
+    case "setting_changed": {
+      const ap = e.applied || {};
+      if (ap.view) {
+        S.view = ap.view;
+        S.model = ap.view.model || S.model;
+        const chip = $("model-chip").querySelector("span");
+        if (chip) swapText(chip, `${S.model.replace(/^.*\//, "")} · ${ap.view.thinking_level ?? "?"}`);
+        $("st-model").textContent = S.model.replace(/^.*\//, "");
+      }
+      window.__settings?.applied(ap);
+      return;
+    }
     case "cost_cap_reached": return addSys(`cost cap reached (${e.scope})`, "err");
   }
 }
@@ -1068,7 +1091,7 @@ function autosize() {
   i.style.height = `${target}px`;
 }
 $("input").addEventListener("input", () => { autosize(); renderComposer(); });
-$("input").addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); doSend(); } });
+$("input").addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing && (PREFS.sendKey !== "mod" || ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); doSend(); } });
 $("send").onclick = doSend;
 $("takeover").onclick = () => { if (S.sid) switchTo(S.sid, "takeover"); };
 $("new-session").onclick = () => switchTo(null, "mirror", true);
@@ -1094,6 +1117,354 @@ document.addEventListener("click", (ev) => {
   else fallback();
 });
 
-applyPalette(null);
+// ── settings ──────────────────────────────────────────────────────────────────
+// Like the TUI's /settings: session rows go to the daemon (`Set`, owner-only,
+// confirmed by setting_changed); appearance / motion / behavior live in this
+// browser. The TUI's Startup/Daemon/Plugins/Providers rows edit the daemon's
+// config file — deliberately not reachable from a browser.
+const PRESETS = {
+  myx: null,
+  midnight: { colors: { primary: "#7aa2ff", secondary: "#b18cff", accent: "#ff9e64", error: "#ff6b81", warning: "#ffc46b", success: "#7ee2a8", info: "#7aa2ff", text: "#dfe4f5", text_muted: "#8089a8", background: "#0b0d16", background_panel: "#12152a", background_element: "#1a1e36", border: "#5b6392", border_active: "#8b93c2", border_subtle: "#343a5e", border_dimmest: "#1f2340" }, fade_ms: 700 },
+  ember: { colors: { primary: "#ff9f5a", secondary: "#ff6f91", accent: "#ffd166", error: "#ff5d6c", warning: "#ffd166", success: "#9be58c", info: "#ffb38a", text: "#f3e6dc", text_muted: "#a08d80", background: "#140d0a", background_panel: "#1d1410", background_element: "#2a1d17", border: "#6e5446", border_active: "#a48070", border_subtle: "#44342b", border_dimmest: "#2a201b" }, fade_ms: 700 },
+  mono: { colors: { primary: "#d6d6d6", secondary: "#a8a8a8", accent: "#e6e6e6", error: "#ff7a7a", warning: "#e0c070", success: "#9fd0a0", info: "#cfcfcf", text: "#ededed", text_muted: "#8c8c8c", background: "#0e0e0e", background_panel: "#161616", background_element: "#202020", border: "#555555", border_active: "#8a8a8a", border_subtle: "#383838", border_dimmest: "#242424" }, fade_ms: 700 },
+};
+const PALETTE_LABEL = { album: "♪ album palette", myx: "myx", midnight: "midnight", ember: "ember", mono: "mono" };
+function applyTheme() {
+  if (PREFS.palette === "album") applyPalette(S.album || null, S.album ? "♪ album palette" : "myx default");
+  else applyPalette(PRESETS[PREFS.palette] || null, PALETTE_LABEL[PREFS.palette]);
+}
+function applyPrefs() {
+  const c = document.documentElement.classList;
+  for (const x of ["fs-s", "fs-m", "fs-l"]) c.toggle(x, PREFS.fontSize === x.slice(3));
+  c.toggle("dense", PREFS.density === "compact");
+  c.toggle("no-glow", !PREFS.glow);
+  c.toggle("no-grain", !PREFS.grain);
+  c.toggle("motion-off", PREFS.motion === "reduced");
+  c.toggle("motion-full", PREFS.motion === "full");
+  REVEAL_LAG_MS = PREFS.lag;
+  $("input").placeholder = $("input").placeholder; // re-evaluated by renderComposer
+  applyTheme();
+}
+function setPref(k, v) { PREFS[k] = v; savePrefs(); applyPrefs(); if (k === "autoscroll" && v) pin(); }
+
+const Settings = (() => {
+  const root = $("settings");
+  const body = $("set-body");
+  const tabs = root.querySelector(".set-tabs");
+  const ind = root.querySelector(".set-ind");
+  const pending = new Map(); // setting id → row
+  const recent = new Map();  // setting key → {ok, message, until} — survives re-renders
+  window.__applied = [];     // test hook: every setting_changed seen
+  let section = "session";
+  let models = null; // {model, favorites}
+  let advOpen = false;
+  const SECTIONS = [
+    { id: "session", icon: "cpu", title: "Session", sub: "Applies to this session live — same as /settings in the TUI." },
+    { id: "appearance", icon: "palette", title: "Appearance", sub: "Saved in this browser." },
+    { id: "motion", icon: "sparkles", title: "Motion", sub: "Animation and streaming feel. Saved in this browser." },
+    { id: "behavior", icon: "sliders", title: "Behavior", sub: "Scrolling and sending. Saved in this browser." },
+    { id: "about", icon: "info", title: "About", sub: "Connection and versions." },
+  ];
+  P.palette = '<circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2a10 10 0 0 0 0 20c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.4A5.6 5.6 0 0 0 22 10c0-4.4-4.5-8-10-8z"/>';
+  P.sliders = '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>';
+  P.info = '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>';
+  for (const sec of SECTIONS) {
+    const b = h("button", "set-tab");
+    b.dataset.sec = sec.id;
+    b.innerHTML = `${svg(sec.icon)}<span>${sec.title}</span>`;
+    b.onclick = () => show(sec.id);
+    tabs.append(b);
+  }
+
+  // ── controls ────────────────────────────────────────────────────────────────
+  function row(label, help, control, opts = {}) {
+    const r = h("div", "set-row");
+    const l = h("div", "set-lbl");
+    l.append(h("div", "set-name", label));
+    if (help) l.append(h("div", "set-help", help));
+    const right = h("div", "set-ctl");
+    right.append(control);
+    const st = h("span", "set-st");
+    right.append(st);
+    r.append(l, right);
+    if (opts.disabled) r.classList.add("disabled");
+    r._st = st;
+    return r;
+  }
+  function segmented(options, value, onPick) {
+    const wrap = h("div", "seg");
+    const thumb = h("div", "seg-thumb");
+    wrap.append(thumb);
+    const place = () => {
+      const a = wrap.querySelector(".seg-opt.on");
+      if (!a) { thumb.style.opacity = "0"; return; }
+      thumb.style.opacity = "1";
+      thumb.style.width = `${a.offsetWidth}px`;
+      thumb.style.transform = `translateX(${a.offsetLeft - 3}px)`;
+    };
+    for (const o of options) {
+      const [val, text, sw] = Array.isArray(o) ? o : [o, o];
+      const b = h("button", `seg-opt${val === value ? " on" : ""}`);
+      if (sw) { const d = h("span", "seg-sw"); d.style.background = sw; b.append(d); }
+      b.append(document.createTextNode(text));
+      b.onclick = () => {
+        if (wrap.classList.contains("locked")) return;
+        wrap.querySelectorAll(".seg-opt").forEach((x) => x.classList.toggle("on", x === b));
+        place();
+        onPick(val);
+      };
+      wrap.append(b);
+    }
+    requestAnimationFrame(() => { wrap.classList.add("no-anim"); place(); requestAnimationFrame(() => wrap.classList.remove("no-anim")); });
+    return wrap;
+  }
+  function toggle(on, onChange) {
+    const b = h("button", `tog${on ? " on" : ""}`);
+    b.setAttribute("role", "switch");
+    b.setAttribute("aria-checked", String(on));
+    b.append(h("span", "tog-knob"));
+    b.onclick = () => { if (b.disabled) return; const v = !b.classList.contains("on"); b.classList.toggle("on", v); b.setAttribute("aria-checked", String(v)); onChange(v); };
+    return b;
+  }
+  function slider(min, max, step, value, fmt, onInput) {
+    const w = h("div", "sld");
+    const inp = h("input");
+    inp.type = "range"; inp.min = min; inp.max = max; inp.step = step; inp.value = value;
+    const bub = h("span", "sld-val", fmt(value));
+    const paint = () => w.style.setProperty("--pct", `${((inp.value - min) / (max - min)) * 100}%`);
+    inp.oninput = () => { bub.textContent = fmt(Number(inp.value)); paint(); onInput(Number(inp.value)); };
+    paint();
+    w.append(inp, bub);
+    return w;
+  }
+  function stepper(value, { min, max, step, unit, toView = (v) => v, fromView = (v) => v }, onCommit) {
+    const w = h("div", "stp");
+    const dec = h("button", "stp-b", "−"), inc = h("button", "stp-b", "+");
+    const inp = h("input", "stp-v");
+    inp.inputMode = "numeric";
+    inp.value = toView(value);
+    const u = h("span", "stp-u", unit || "");
+    let t = 0;
+    const commit = () => { clearTimeout(t); t = setTimeout(() => { const v = Math.min(max, Math.max(min, Number(inp.value) || 0)); inp.value = v; onCommit(fromView(v)); }, 450); };
+    dec.onclick = () => { inp.value = Math.max(min, (Number(inp.value) || 0) - step); commit(); };
+    inc.onclick = () => { inp.value = Math.min(max, (Number(inp.value) || 0) + step); commit(); };
+    inp.onchange = commit;
+    inp.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } };
+    w.append(dec, inp, u, inc);
+    return w;
+  }
+  function modelPicker(current, list, onPick) {
+    const w = h("div", "mdl");
+    const btn = h("button", "mdl-btn");
+    const label = (m) => { const [prov, name] = m.includes("/") ? m.split(/\/(.*)/) : ["", m]; return `<span class="mdl-prov">${esc(prov)}</span><span class="mdl-name">${esc(name)}</span>`; };
+    btn.innerHTML = `${label(current)}${svg("chev", "i chev")}`;
+    const pop = h("div", "mdl-pop hidden");
+    const all = [...new Set([current, ...(list || [])].filter(Boolean))];
+    const groups = {};
+    for (const m of all) (groups[m.split("/")[0] || "other"] ||= []).push(m);
+    for (const [prov, ms] of Object.entries(groups)) {
+      pop.append(h("div", "mdl-grp", prov));
+      for (const m of ms) {
+        const o = h("button", `mdl-opt${m === current ? " on" : ""}`);
+        o.innerHTML = `<span>${esc(m.split(/\/(.*)/)[1] || m)}</span>${m === current ? svg("check") : ""}`;
+        o.onclick = () => { close(); if (m !== current) onPick(m); };
+        pop.append(o);
+      }
+    }
+    const custom = h("div", "mdl-custom");
+    const ci = h("input");
+    ci.placeholder = "provider/model — Enter to use";
+    ci.onkeydown = (e) => { if (e.key === "Enter" && /^[\w.-]+\/[\w.:-]+$/.test(ci.value.trim())) { close(); onPick(ci.value.trim()); } else if (e.key === "Escape") { e.stopPropagation(); close(); } };
+    custom.append(ci);
+    pop.append(custom);
+    const close = () => { pop.classList.add("hidden"); w.classList.remove("open"); };
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      if (btn.disabled) return;
+      const open = pop.classList.contains("hidden");
+      document.querySelectorAll(".mdl-pop").forEach((x) => x.classList.add("hidden"));
+      if (open) { pop.classList.remove("hidden"); w.classList.add("open"); anim(pop, [{ opacity: 0, transform: "translateY(-6px) scale(.98)" }, { opacity: 1, transform: "none" }], { duration: 200 }); }
+      else close();
+    };
+    w.append(btn, pop);
+    w._btn = btn;
+    return w;
+  }
+
+  // ── session settings over the wire ──────────────────────────────────────────
+  function setSession(r, setting) {
+    if (!S.sid || !isOwner()) { toast("Take over input to change session settings"); return; }
+    r.dataset.key = setting.setting;
+    const id = S.qid++;
+    pending.set(id, r);
+    r._st.className = "set-st busy";
+    r._st.innerHTML = '<span class="spinner"></span>';
+    cmd({ cmd: "set", id, setting });
+  }
+  function paintStatus(r, ok, message, draw) {
+    r._st.className = `set-st ${ok ? "ok" : "err"}`;
+    r._st.innerHTML = ok ? svg("check", draw ? "i draw" : "i") : svg("x", draw ? "i draw" : "i");
+    r.querySelector(".set-err")?.remove();
+    if (!ok && message) r.querySelector(".set-lbl").append(h("div", "set-err", message));
+  }
+  function applied(ap) {
+    window.__applied.push({ setting: ap.setting, ok: ap.ok, message: ap.message || null });
+    recent.set(ap.setting, { ok: ap.ok, message: ap.message, until: performance.now() + (ap.ok ? 1800 : 8000) });
+    const r = pending.get(ap.id);
+    pending.delete(ap.id);
+    if (r && r.isConnected) {
+      paintStatus(r, ap.ok, ap.message, true);
+      setTimeout(() => { if (r._st.classList.contains("ok")) { r._st.className = "set-st"; r._st.innerHTML = ""; } }, 1800);
+    }
+    if (ap.clamp) toast(`Thinking → ${ap.clamp.to} (not supported: ${ap.clamp.from})`);
+    if (ap.ok) setTimeout(rerender, 350); // key-based: only if model/thinking/etc. changed
+  }
+
+  // ── sections ────────────────────────────────────────────────────────────────
+  const fmtBytes = (b) => (b >= 1024 * 1024 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.round(b / 1024)} KB`);
+  function renderSession() {
+    const v = S.view;
+    const own = isOwner();
+    const frag = document.createDocumentFragment();
+    if (!S.sid || !v) { frag.append(h("div", "set-note", "No session attached.")); return frag; }
+    if (!own) {
+      const n = h("div", "set-note warn");
+      n.append(h("span", null, `You're watching — ${S.owner != null ? who(S.owner) : "nobody"} owns input. Take over to change session settings.`));
+      const b = h("button", "btn-ghost", "Take over");
+      b.onclick = () => { close(); switchTo(S.sid, "takeover"); };
+      n.append(b);
+      frag.append(n);
+    }
+    const dis = { disabled: !own };
+    const mr = row("Model", "Which model this session uses. Favorites come from your Synaps config.", h("span"), dis);
+    mr.dataset.key = "model";
+    const mp = modelPicker(v.model, models?.favorites, (m) => setSession(mr, { setting: "model", model: m }));
+    mr.querySelector(".set-ctl").replaceChild(mp, mr.querySelector(".set-ctl").firstChild);
+    mp._btn.disabled = !own;
+    frag.append(mr);
+    const tr = row("Thinking", "Reasoning depth. The daemon validates it against the model.", h("span"), dis);
+    tr.dataset.key = "reasoning_level";
+    tr.querySelector(".set-ctl").replaceChild(segmented(["off", "low", "medium", "high", "xhigh", "max"], v.thinking_level, (lvl) => setSession(tr, { setting: "reasoning_level", level: lvl })), tr.querySelector(".set-ctl").firstChild);
+    frag.append(tr);
+    const cw = v.context_window >= 1_000_000 ? "1m" : v.context_window >= 200_000 ? "200k" : "auto";
+    const cr = row("Context window", `Current limit: ${Number(v.context_window).toLocaleString()} tokens.`, h("span"), dis);
+    cr.dataset.key = "context_window";
+    cr.querySelector(".set-ctl").replaceChild(segmented([["200k", "200k"], ["1m", "1M"], ["auto", "Auto"]], cw, (x) => setSession(cr, { setting: "context_window", tokens: x === "auto" ? null : x === "1m" ? 1_000_000 : 200_000 })), cr.querySelector(".set-ctl").firstChild);
+    frag.append(cr);
+    const adv = h("details", "set-adv");
+    adv.open = advOpen;
+    adv.addEventListener("toggle", () => { advOpen = adv.open; });
+    adv.innerHTML = `<summary>${svg("chev", "i chev")}<span>Advanced — tool limits & retries</span></summary>`;
+    const ab = h("div", "set-adv-body");
+    const num = (label, help, key, value, o) => { const r = row(label, help, h("span"), dis); r.dataset.key = key; r.querySelector(".set-ctl").replaceChild(stepper(value, o, (val) => setSession(r, { setting: key, ...o.payload(val) })), r.querySelector(".set-ctl").firstChild); ab.append(r); };
+    num("Bash timeout", "Default time limit for a shell command.", "bash_timeout", v.bash_timeout, { min: 1, max: 3600, step: 5, unit: "s", payload: (x) => ({ secs: x }) });
+    num("Bash max timeout", "Upper bound a command may request.", "bash_max_timeout", v.bash_max_timeout, { min: 1, max: 86400, step: 30, unit: "s", payload: (x) => ({ secs: x }) });
+    num("Max tool output", "Tool output kept per call.", "max_tool_output", v.max_tool_output, { min: 1, max: 4096, step: 4, unit: "KB", toView: (b) => Math.round(b / 1024), fromView: (k) => k * 1024, payload: (x) => ({ bytes: x }) });
+    num("Subagent timeout", "Time limit for a delegated subagent.", "subagent_timeout", v.subagent_timeout, { min: 10, max: 86400, step: 30, unit: "s", payload: (x) => ({ secs: x }) });
+    num("API retries", "Retries on transient provider errors.", "api_retries", v.api_retries, { min: 0, max: 20, step: 1, unit: "", payload: (x) => ({ n: x }) });
+    adv.append(ab);
+    frag.append(adv);
+    if (!own) frag.querySelectorAll("button:not(.btn-ghost), input").forEach((x) => { if (!x.closest(".set-adv > summary")) x.disabled = true; });
+    return frag;
+  }
+  function renderAppearance() {
+    const frag = document.createDocumentFragment();
+    const sw = (k) => PRESETS[k] ? `linear-gradient(135deg, ${PRESETS[k].colors.primary}, ${PRESETS[k].colors.secondary})` : k === "album" ? "conic-gradient(from 0deg, var(--primary), var(--secondary), var(--accent), var(--primary))" : "linear-gradient(135deg, #82aaff, #c099ff)";
+    frag.append(row("Palette", "Album follows Myx live — the UI takes the current album's colors.", segmented(["album", "myx", "midnight", "ember", "mono"].map((k) => [k, k === "album" ? "Album" : k[0].toUpperCase() + k.slice(1), sw(k)]), PREFS.palette, (v) => setPref("palette", v))));
+    frag.append(row("Text size", null, segmented([["s", "S"], ["m", "M"], ["l", "L"]], PREFS.fontSize, (v) => setPref("fontSize", v))));
+    frag.append(row("Density", "Spacing between messages.", segmented([["comfy", "Comfortable"], ["compact", "Compact"]], PREFS.density, (v) => setPref("density", v))));
+    frag.append(row("Ambient glow", "Soft album-colored light behind the UI.", toggle(PREFS.glow, (v) => setPref("glow", v))));
+    frag.append(row("Film grain", "A whisper of texture.", toggle(PREFS.grain, (v) => setPref("grain", v))));
+    return frag;
+  }
+  function renderMotion() {
+    const frag = document.createDocumentFragment();
+    frag.append(row("Animations", `System follows your OS setting (${RM.matches ? "reduced" : "full"} right now).`, segmented([["system", "System"], ["full", "Full"], ["reduced", "Reduced"]], PREFS.motion, (v) => setPref("motion", v))));
+    frag.append(row("Stream smoothing", "How far the text trails the model so it flows instead of jumping. 0 = raw.", slider(0, 600, 8, PREFS.lag, (v) => (v ? `${v} ms` : "off"), (v) => { PREFS.lag = v; REVEAL_LAG_MS = v; savePrefs(); })));
+    return frag;
+  }
+  function renderBehavior() {
+    const frag = document.createDocumentFragment();
+    frag.append(row("Stick to bottom", "Follow new output until you scroll up.", toggle(PREFS.autoscroll, (v) => setPref("autoscroll", v))));
+    frag.append(row("Send with", "Shift+Enter always adds a new line.", segmented([["enter", "Enter"], ["mod", `${/Mac/.test(navigator.platform) ? "⌘" : "Ctrl"}+Enter`]], PREFS.sendKey, (v) => setPref("sendKey", v))));
+    return frag;
+  }
+  function renderAbout() {
+    const frag = document.createDocumentFragment();
+    const w = S.welcome || {};
+    const kv = (k, v, copy) => {
+      const r = h("div", "set-kv");
+      r.append(h("span", "k", k));
+      const val = h("span", "v", v ?? "—");
+      r.append(val);
+      if (copy && v) { const b = h("button", "copy"); b.innerHTML = `${svg("copy")}<span>Copy</span>`; b.onclick = () => { navigator.clipboard?.writeText(v); b.lastChild.textContent = "Copied"; setTimeout(() => (b.lastChild.textContent = "Copy"), 1200); }; r.append(b); }
+      return r;
+    };
+    const card = h("div", "set-card");
+    card.append(kv("Session", S.sid, true), kv("Client", S.me != null ? who(S.me) : null), kv("Model", S.view?.model), kv("Daemon", w.daemon_version && `v${w.daemon_version} · pid ${w.pid} · gen ${w.generation}`), kv("Protocol", w.protocol_version && `v${w.protocol_version}`), kv("Profile", w.profile || "default"), kv("synaps·dash", S.bridgeVersion ? `v${S.bridgeVersion}` : null));
+    frag.append(card);
+    return frag;
+  }
+  const RENDER = { session: renderSession, appearance: renderAppearance, motion: renderMotion, behavior: renderBehavior, about: renderAbout };
+
+  function render(quiet) {
+    if (section === "session") lastKey = sessionKey();
+    const sec = SECTIONS.find((x) => x.id === section);
+    $("set-sec-title").textContent = sec.title;
+    $("set-sec-sub").textContent = sec.sub;
+    body.replaceChildren(RENDER[section]());
+    const now = performance.now();
+    for (const r of body.querySelectorAll(".set-row[data-key]")) {
+      const x = recent.get(r.dataset.key);
+      if (x && x.until > now) paintStatus(r, x.ok, x.message, false);
+    }
+    if (!quiet) anim(body, [{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { duration: 220 });
+  }
+  function show(id) {
+    section = id;
+    tabs.querySelectorAll(".set-tab").forEach((b) => b.classList.toggle("on", b.dataset.sec === id));
+    const a = tabs.querySelector(".set-tab.on");
+    ind.style.transform = `translateY(${a.offsetTop}px)`;
+    ind.style.height = `${a.offsetHeight}px`;
+    render();
+  }
+  async function open(sec) {
+    root.classList.remove("hidden");
+    const g = $("open-settings");
+    anim(g.querySelector(".i"), [{ transform: "rotate(0)" }, { transform: "rotate(120deg)" }], { duration: 420, easing: EASE.out });
+    fetch("/api/models").then((r) => r.json()).then((m) => { models = m; if (section === "session") render(true); }).catch(() => {});
+    fetch("/api/info").then((r) => r.json()).then((i) => { S.bridgeVersion = i.bridge; if (section === "about") render(true); }).catch(() => {});
+    show(sec || section);
+  }
+  function close() {
+    if (root.classList.contains("hidden")) return;
+    const a = anim(root, [{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: EASE.move });
+    anim(root.querySelector(".set-sheet"), [{ transform: "none" }, { transform: "translateY(8px) scale(.97)" }], { duration: 160, easing: EASE.move });
+    if (a) a.onfinish = () => root.classList.add("hidden"); else root.classList.add("hidden");
+  }
+  $("open-settings").onclick = () => open();
+  $("close-settings").onclick = close;
+  root.addEventListener("click", (e) => {
+    if (e.target === root) { close(); return; }
+    root.querySelectorAll(".mdl.open").forEach((w) => { if (!w.contains(e.target)) { w.classList.remove("open"); w.querySelector(".mdl-pop").classList.add("hidden"); } });
+  });
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === ",") { e.preventDefault(); root.classList.contains("hidden") ? open() : close(); }
+    else if (e.key === "Escape" && !root.classList.contains("hidden")) { e.stopImmediatePropagation(); close(); }
+  }, true);
+  // Re-render ONLY when what the session section shows actually changed
+  // (never on every stream event — that would close dropdowns / eat input).
+  let lastKey = "";
+  const sessionKey = () => [S.sid, isOwner(), S.owner, S.view?.model, S.view?.thinking_level, S.view?.context_window, !!models].join("|");
+  function rerender() {
+    if (root.classList.contains("hidden") || section !== "session") return;
+    const k = sessionKey();
+    if (k !== lastKey) { lastKey = k; render(true); }
+  }
+  return { open, close, applied, rerender };
+})();
+window.__settings = Settings;
+
+applyPrefs();
 setInterval(() => send({ type: "sessions" }), 5000);
 connect();
