@@ -88,16 +88,32 @@ button:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px sol
 svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 /* ── app shell ─────────────────────────────────────────────────────────── */
-#app { position: relative; z-index: 1; display: grid; grid-template-columns: var(--rail) 1fr; height: 100%; }
-#app.rail-collapsed { grid-template-columns: 0 1fr; }
+#app { position: relative; z-index: 1; display: grid; grid-template-columns: var(--rail) 1fr; height: 100%;
+  /* rail drawer. The transition on the state being ENTERED applies, so the two
+     directions get different curves — neither is constant speed:
+     open  = expo-out: launches fast, long soft landing (responsive)
+     close = in-out: gathers, fastest mid-way, eases shut */
+  transition: grid-template-columns 520ms var(--ease); }
+#app.rail-collapsed { grid-template-columns: 0 1fr; transition: grid-template-columns 380ms var(--ease-move); }
+/* explicit, not auto-placed: on mobile the rail is position:fixed (out of the
+   grid), and auto-placement would drop #main into the 0-width first track */
+#main { grid-column: 2; min-width: 0; }
 
 /* rail */
 #rail {
-  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
   background: color-mix(in oklab, var(--bg) 55%, transparent);
   border-right: 1px solid var(--line-soft);
   backdrop-filter: blur(20px) saturate(130%);
+  transition: border-color 520ms var(--ease);
 }
+/* Contents keep the rail's full width and slide with the column edge (same
+   duration + curve as the grid track), so the panel moves as one piece and
+   nothing inside re-wraps mid-animation. */
+#rail > * { width: var(--rail); transition: transform 520ms var(--ease), opacity 360ms var(--ease) 60ms; }
+#app.rail-collapsed #rail { border-right-color: transparent; transition: border-color 380ms var(--ease-move); }
+#app.rail-collapsed #rail > * { transform: translateX(calc(-1 * var(--rail))); opacity: 0;
+  transition: transform 380ms var(--ease-move), opacity 220ms var(--ease-move); }
 .brand { display: flex; align-items: center; gap: 10px; padding: 18px 18px 14px; font-weight: 650; letter-spacing: -.01em; font-size: 15px; }
 .brand .mark {
   width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
@@ -325,8 +341,16 @@ kbd { font: 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; border: 1p
 
 /* responsive */
 @media (max-width: 860px) {
-  #app { grid-template-columns: 0 1fr; }
-  #app.rail-open #rail { position: fixed; inset: 0 auto 0 0; width: min(300px, 86vw); z-index: 40; box-shadow: 20px 0 60px -20px rgba(0,0,0,.7); }
+  /* overlay drawer: slides over the chat instead of pushing it. Same asymmetry
+     as desktop — expo-out in, in-out away; visibility flips after the slide-out
+     so a closed rail can't take focus. */
+  #app, #app.rail-collapsed { grid-template-columns: 0 1fr; transition: none; }
+  #rail { position: fixed; inset: 0 auto 0 0; width: min(300px, 86vw); z-index: 40; border-right-color: var(--line-soft);
+    transform: translateX(-105%); visibility: hidden;
+    transition: transform 380ms var(--ease-move), box-shadow 380ms var(--ease-move), visibility 0s linear 380ms; }
+  #app.rail-open #rail { transform: none; visibility: visible; box-shadow: 20px 0 60px -20px rgba(0,0,0,.7);
+    transition: transform 520ms var(--ease), box-shadow 520ms var(--ease), visibility 0s; }
+  #rail > *, #app.rail-collapsed #rail > * { width: auto; transform: none; opacity: 1; }
   #thread { padding: 70px 14px 190px; }
   #dock { padding: 0 10px 12px; }
   .hints, #conn-text { display: none; }
@@ -635,7 +659,7 @@ kbd { font: 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; border: 1p
 .tool-head:active, .act-head:active, .think > summary:active { transform: scale(.995); }
 
 /* app shell arrives once */
-#rail { animation: shell-left 480ms var(--ease) both; }
+#rail { animation: shell-left 480ms var(--ease) backwards; } /* not `both`: a forwards fill would own `transform` forever and block the mobile drawer's transition */
 #top { animation: shell-down 420ms var(--ease) 80ms both; }
 #composer { animation: shell-up 480ms var(--ease) 140ms both; }
 .empty .glyph { animation: float 6s ease-in-out infinite; }

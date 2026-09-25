@@ -188,6 +188,7 @@ config's hash is unchanged.
 | `test/run-state.cjs` | header pill states, TUI spinner frames + cadence, pulse, layout, reconnect, reduced motion |
 | `test/glow.cjs` | glow speed ramps slow → fast → slow both ways, never snaps, settles and stops at idle, static under reduced motion |
 | `test/tool-views.cjs` | every tool view against real-shaped events, failure detection, folding / truncation / streamed deltas, fallbacks, HTML escaping; then a real turn with real tools |
+| `test/rail.cjs` | rail drawer: exact curves by pausing and seeking the running transitions (close in-out, open expo-out, desktop + mobile), solid panel at every step, no re-wrap, cascade, aria-expanded, mobile layout, reduced motion |
 | `test/live.cjs` | multi-client: mirror a peer's turn, optionally take over and submit |
 | `test/headless.cjs` | headless DOM smoke check |
 | `test/probe.ts` | raw protocol through the bridge + frame-filter refusals |
