@@ -12,15 +12,28 @@ daemon ──spawns──▶ synaps-dash (this extension) ◀── HTTP/WS 127.
    └──── daemon.sock ◀───┘  one UDS connection per tab, as a normal client (kind "server")
 ```
 
+About 3.7k lines (`web/app.js`, `main.ts`, `web/style.css`, `web/index.html`), with no
+dependencies: the server uses only Bun built-ins, and the client is plain JS with no
+framework and no build step.
+
 ## Features
 
 - **Live, shared sessions.** Attach to any daemon session, see every client (TUI and web)
   as presence avatars, take over input, answer approval and secret prompts, and switch
   sessions from the rail.
-- **Session rail with history.** The rail shows **Live** sessions (in the daemon now) and,
-  below them, **Recent** sessions that live only on disk. Click a live one to attach; click a
-  recent one to resume it (it loads its history and becomes live). Recent sessions are read
-  header-only from `~/.synaps-cli/sessions` (`/api/sessions`) — never the message bodies.
+- **Session rail with history.** **Live** lists sessions someone is attached to right
+  now. **Recent** lists the ones nobody is on: detached sessions the daemon still holds, and
+  sessions that exist only on disk. Clicking a session attaches if the daemon still has it
+  in memory, or resumes it from disk (history loads, and it moves up to Live). Disk sessions
+  are read header-only from `~/.synaps-cli/sessions` (`/api/sessions`), never the message
+  bodies.
+- **Run state in the header**, mirroring the TUI's status span: `● streaming` (pulsing on
+  the TUI's ~2s cycle), `⠋ compacting…` / `⠋ connecting…` (the TUI's braille spinner, same
+  speed), `○ ready`.
+- **Ambient glow that works with the agent.** The album-coloured background glow drifts
+  while a turn is running and settles back when it's idle. The speed ramps up and down
+  smoothly (slow start, fastest in the middle, eased finish). Only transform and opacity
+  change, and nothing runs while idle, under reduced motion, or with the glow off.
 - **Album-reactive palette.** Subscribes to [Myx](https://github.com/HaseebKhalid1507)'s
   MXC colour protocol (`$XDG_RUNTIME_DIR/myx/theme.sock`). The whole UI takes the current
   album's 16 colour tokens and cross-fades on track change, in sync with the TUI, the
@@ -114,6 +127,14 @@ The daemon trusts its uid (0600 socket), so **this process is the boundary**:
   `set` only for model, reasoning_level, context_window, compaction_model, api_retries,
   subagent_timeout, max_tool_output, bash_timeout, bash_max_timeout
 - `/api/models` returns only `model` + `favorite_models` from the Synaps config (never keys)
+- `/api/config` reads and writes a fixed allowlist of config keys, with each value validated
+  by the bridge. Provider keys, `server.*`, `auth.*`, `bridge.*` and `shell.*` can't be read
+  or written. Writes must be same-origin `application/json` (a form-style cross-site POST
+  gets 415), they take the same `flock` on `config.lock` plus atomic rename as Synaps, and
+  they're refused for a profile that has no config file of its own (writing would shadow the
+  default config)
+- `/api/sessions` returns session headers only (id, title, model, times, cost, message count):
+  never messages, system prompts or env
 - `attach create` config is sanitised (no `prompt_manifest`/`env`; `auto_approve_confirms=false`)
 - `shutdown` / `reload` / `purge` / `hello` / `end` are refused
 - serves only when hosted by a registered daemon (its `daemon*.json` pid == our ppid).
@@ -132,7 +153,9 @@ cd /tmp/synaps-web-sandbox && SYNAPS_PROFILE=webproto synaps daemon --profile we
 xdg-open "$(cat ~/.synaps-cli/run/synaps-dash-webproto.url)"
 ```
 
-The tests are Playwright scripts that drive real turns against the sandbox:
+The tests are Playwright scripts that drive real turns against the sandbox. They only ever
+target the sandbox; the config tests restore the sandbox config and check that the live
+config's hash is unchanged.
 
 | Test | Covers |
 |---|---|
@@ -144,6 +167,13 @@ The tests are Playwright scripts that drive real turns against the sandbox:
 | `test/stream-probe.cjs` | streaming smoothness: wire cadence vs per-frame reveal |
 | `test/shot-activity.cjs` | screenshot of an expanded activity batch |
 | `test/settings.cjs` | settings panel: every control, session settings via the daemon, persistence, watcher read-only, unsafe-setting refusal |
+| `test/config.cjs` | Synaps config sections: UI → disk for every control type, reset, favorites, plugins, providers leak nothing, failed writes snap back |
+| `test/config-reload.cjs` | a config change is ignored until `daemon reload`, applied after it; the old token dies |
+| `test/sessions.cjs` | Live/Recent split by client count, no bodies in `/api/sessions`, resume keeps the id and history |
+| `test/run-state.cjs` | header pill states, TUI spinner frames + cadence, pulse, layout, reconnect, reduced motion |
+| `test/glow.cjs` | glow speed ramps slow → fast → slow both ways, never snaps, settles and stops at idle, static under reduced motion |
+| `test/live.cjs` | multi-client: mirror a peer's turn, optionally take over and submit |
+| `test/headless.cjs` | headless DOM smoke check |
 | `test/probe.ts` | raw protocol through the bridge + frame-filter refusals |
 
 ## Protocol notes (verified on SynapsCLI 0.9.1, protocol v3)
@@ -159,10 +189,39 @@ The tests are Playwright scripts that drive real turns against the sandbox:
   client, and synaps-dash filters it out.
 - Streaming cadence is set by the provider (~12 chars / ~60ms from Anthropic, measured
   directly). The daemon → socket hop adds ~0.1ms.
+- The daemon reads its config **once, at start**: `host.reload_config()` has no callers.
+  Config edits (from here or the TUI) apply to new sessions only after `daemon reload`.
+  `daemon.prompt_abandon_secs` / `parked_evict_secs` are the exception, read live.
+- `session_list` metadata carries `clients` and `lifecycle`. A session with no journal on disk
+  never parks: it stays `lifecycle=live` at 0 clients until eviction (default 1h). That's why
+  the rail splits Live/Recent on `clients`, not on `lifecycle` or daemon membership.
+- Compaction sends a **non-streaming** request, and the runtime's HTTP client drops a request
+  after 90s without receiving data. On a very large session the summary can't finish
+  generating in 90s, so every retry times out the same way (shows up as a "hung"
+  compaction). Fix upstream: stream the compaction request.
 
 ## Roadmap
 
-Edit diffs · subagent panel · long-turn handling · ⌘K command palette · slash commands ·
-presence icons · attachments · lag → auto-resync · reconnect ownership restore.
+Toward an agentic development environment. First, things the protocol already sends that
+the client doesn't use yet:
+
+- **Subagents panel.** Subagent start/update/done events, live parallel agents, steer them
+  (plus `N agents` in the run-state pill, like the TUI).
+- **Command palette + slash commands** (`⌘K`) over `engine_command` / `plugin_command`.
+- **Context meter + compact.** `ContextReport` / `ContextAssessment` queries; handle
+  `CompactionCancelled`.
+- **Edit diffs** rendered from `edit`/`write` tool inputs.
+- **Auto mode and events.** The `Driver*` events, `AutoTurnCapReached`, `External`,
+  `ExtensionNotification`.
+- **"Needs you" browser notifications** when the agent is waiting on input.
+
+Needing the bridge (same host): a workspace file tree/viewer and `@`-mentions, git status/diff/commit,
+a read-only view of the agent's PTY sessions.
+
+Needing Synaps: per-turn file checkpoints (undo/rewind), a structured file-change event,
+diff-before-write approval, plan/todo events, streaming compaction.
+
+Smaller: presence icons · attachments · lag → auto-resync · reconnect ownership restore ·
+long-turn handling.
 
 MIT
