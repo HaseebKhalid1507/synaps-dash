@@ -1,11 +1,11 @@
-# synaps-web
+# synaps-dash
 
 Browser client for the SynapsCLI session daemon, shipped as a **plain extension —
 zero changes to synaps**. A browser tab becomes an ordinary daemon client, a peer
 of the TUI on the same session (same event stream, same input-ownership rules).
 
 ```
-daemon ──spawns──▶ synaps-web (this extension) ◀── HTTP/WS 127.0.0.1:7717 ──▶ browser tabs
+daemon ──spawns──▶ synaps-dash (this extension) ◀── HTTP/WS 127.0.0.1:7717 ──▶ browser tabs
    ▲                     │
    └──── daemon.sock ◀───┘  one UDS connection per tab, as a normal client (kind "server")
 ```
@@ -19,15 +19,15 @@ daemon ──spawns──▶ synaps-web (this extension) ◀── HTTP/WS 127.0
 
 ```bash
 # profile config: ~/.synaps-cli/webproto/config (global plugins disabled, own sessions)
-mkdir -p /tmp/synaps-web-sandbox/.synaps/plugins
-ln -sfn ~/Projects/synaps-web /tmp/synaps-web-sandbox/.synaps/plugins/synaps-web
-cd /tmp/synaps-web-sandbox
+mkdir -p /tmp/synaps-dash-sandbox/.synaps/plugins
+ln -sfn ~/Projects/synaps-dash /tmp/synaps-dash-sandbox/.synaps/plugins/synaps-dash
+cd /tmp/synaps-dash-sandbox
 SYNAPS_PROFILE=webproto synaps-dev daemon --profile webproto --detach
 SYNAPS_PROFILE=webproto synaps-dev --profile webproto --attach --new     # the TUI
-xdg-open "$(cat ~/.synaps-cli/run/synaps-web-webproto.url)"               # the browser
+xdg-open "$(cat ~/.synaps-cli/run/synaps-dash-webproto.url)"               # the browser
 ```
 
-Port: `extension.synaps-web.port = N` in the profile config (env does NOT reach
+Port: `extension.synaps-dash.port = N` in the profile config (env does NOT reach
 extensions — see below). Tear down: `synaps-dev daemon --profile webproto stop`.
 
 ## Security boundary (the daemon trusts its uid, so this process is the boundary)
@@ -48,11 +48,11 @@ extensions — see below). Tear down: `synaps-dev daemon --profile webproto stop
 - `docs/daemon-mode.md` says protocol v1; code + live daemon are **v3** (docs stale).
 - **Upstream gap 1:** `TurnStarted.user_text` is only set for queued turns, so a *peer*
   client never sees another client's prompt text. The TUI shows the reply without the
-  prompt; synaps-web works around it with a `display_tail` query.
+  prompt; synaps-dash works around it with a `display_tail` query.
 - **Upstream gap 2:** `Attached.replay` holds the *last* turn's ring even after it
   finished (cleared only at the next turn start), and the TUI applies it
   unconditionally → likely double-render of the last turn when a second TUI attaches
-  after a finished turn. synaps-web applies replay only when `streaming`.
+  after a finished turn. synaps-dash applies replay only when `streaming`.
 - Cancel is an input-owner command → the web needs "take over" to stop a turn.
 
 ## Not done yet
