@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
+  <div id="glow" aria-hidden="true"><div id="glow-a" class="blob"></div><div id="glow-b" class="blob"></div></div>
   <div id="app">
     <aside id="rail">
       <div class="brand"><div class="mark">S</div><span>synaps<span class="dim">·dash</span></span></div>
@@ -44,6 +45,7 @@
         </button>
         <div class="title-wrap">
           <div id="sess-title">synaps·dash</div>
+          <span id="run-state" class="hidden" role="status" aria-live="polite"><span class="rs-glyph">○</span><span class="rs-text">ready</span></span>
           <span id="model-chip" class="chip hidden"></span>
         </div>
         <div id="presence"></div>

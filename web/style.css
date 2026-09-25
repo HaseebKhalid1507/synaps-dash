@@ -64,17 +64,15 @@ body {
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
-/* depth: two soft album glows + faint film grain */
-body::before {
-  content: "";
-  position: fixed; inset: -20%;
-  background:
-    radial-gradient(40% 35% at 18% 12%, color-mix(in oklab, var(--primary) 22%, transparent), transparent 70%),
-    radial-gradient(38% 34% at 88% 92%, color-mix(in oklab, var(--secondary) 18%, transparent), transparent 70%);
-  filter: blur(40px);
-  pointer-events: none;
-  z-index: 0;
-}
+/* depth: two soft album glows (#glow, drifts while the agent works — app.js
+   Glow) + faint film grain. The blobs are separate layers moved only by
+   transform/opacity, so the blurred gradients are rasterized once and the
+   drift is compositor-only. At rest (opacity .815) they match the old static
+   glow: 27% × .815 ≈ 22%, 22% × .815 ≈ 18%. */
+#glow { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+#glow .blob { position: absolute; inset: -20%; filter: blur(40px); opacity: .815; will-change: transform, opacity; }
+#glow-a { background: radial-gradient(40% 35% at 18% 12%, color-mix(in oklab, var(--primary) 27%, transparent), transparent 70%); }
+#glow-b { background: radial-gradient(38% 34% at 88% 92%, color-mix(in oklab, var(--secondary) 22%, transparent), transparent 70%); }
 body::after {
   content: "";
   position: fixed; inset: 0;
@@ -155,6 +153,16 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
   color: var(--muted); background: color-mix(in oklab, var(--elem) 80%, transparent); border: 1px solid var(--line-soft);
 }
 .chip .i { width: 12px; height: 12px; }
+/* run state — mirrors the TUI header: `│ ● streaming` / `│ ⠋ compacting…` / `│ ○ ready`.
+   Pulse = the TUI's 0.7 ± 0.3 brightness sine (0.4–1.0) at 2π·20 ticks × 16ms ≈ 2.01s. */
+#run-state { position: relative; flex: none; display: inline-flex; align-items: center; gap: 7px; padding-left: 13px;
+  font: 12px/1 var(--mono); white-space: nowrap; color: var(--muted); transition: color 300ms var(--ease); }
+#run-state::before { content: ""; position: absolute; left: 0; top: -1px; bottom: -1px; width: 1px; background: var(--line); }
+#run-state .rs-glyph { display: inline-block; min-width: 1ch; text-align: center; }
+#run-state.streaming, #run-state.busy { color: var(--primary); }
+#run-state.streaming .rs-glyph { text-shadow: 0 0 8px var(--primary-glow); }
+#run-state.streaming .rs-glyph, #run-state.streaming .rs-text { animation: tui-pulse 2.01s ease-in-out infinite; }
+@keyframes tui-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
 #presence { display: flex; align-items: center; }
 .av {
   position: relative; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; margin-left: -6px;
@@ -551,7 +559,7 @@ html.fs-l body { font-size: 15.5px; }
 html.fs-l #input { font-size: 15.5px; } html.fs-s #input { font-size: 13.5px; }
 html.dense .msg { margin-bottom: 12px; }
 html.dense .msg.asst .body { gap: 6px; }
-html.no-glow body::before { display: none; }
+html.no-glow #glow { display: none; }
 html.no-grain body::after { display: none; }
 html.motion-off *, html.motion-off *::before, html.motion-off *::after { animation: none !important; transition: none !important; }
 html.motion-off .i.draw path { stroke-dashoffset: 0; }

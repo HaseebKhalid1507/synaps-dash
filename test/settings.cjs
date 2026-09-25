@@ -57,7 +57,7 @@ const fs = require("fs");
   await seg("Palette", "Midnight"); await p.waitForTimeout(900);
   await seg("Text size", "L");
   await p.locator(".set-row", { hasText: "Ambient glow" }).locator(".tog").click();
-  R.appearance = await p.evaluate(() => ({ bg: getComputedStyle(document.documentElement).getPropertyValue("--bg").trim(), fsL: document.documentElement.classList.contains("fs-l"), noGlow: document.documentElement.classList.contains("no-glow"), glowDisplay: getComputedStyle(document.body, "::before").display, label: document.querySelector("#swatches .lbl").textContent }));
+  R.appearance = await p.evaluate(() => ({ bg: getComputedStyle(document.documentElement).getPropertyValue("--bg").trim(), fsL: document.documentElement.classList.contains("fs-l"), noGlow: document.documentElement.classList.contains("no-glow"), glowDisplay: getComputedStyle(document.getElementById("glow")).display, label: document.querySelector("#swatches .lbl").textContent }));
   // motion slider
   await p.click(".set-tab >> text=Motion"); await p.waitForTimeout(300);
   await p.evaluate(() => { const i = document.querySelector(".sld input"); i.value = "320"; i.dispatchEvent(new Event("input", { bubbles: true })); });
