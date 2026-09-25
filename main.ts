@@ -286,7 +286,7 @@ async function startServer() {
           if (!tokenOk(qt)) return new Response("bad token\n", { status: 401 });
           return new Response(null, {
             status: 302,
-            headers: { location: "/", "set-cookie": `${COOKIE}=${TOKEN}; HttpOnly; SameSite=Strict; Path=/${secure ? "; Secure" : ""}` },
+            headers: { location: "/", "set-cookie": `${COOKIE}=${TOKEN}; HttpOnly; SameSite=Lax; Path=/${secure ? "; Secure" : ""}` },
           });
         }
         if (!tokenOk(cookieToken(req))) {
