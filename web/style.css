@@ -228,48 +228,9 @@ svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
 /* streaming caret */
 .caret { display: inline-block; width: 7px; height: 1.05em; margin-left: 2px; vertical-align: -2px; border-radius: 2px; background: var(--primary); box-shadow: 0 0 10px var(--primary-glow); animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
-
-/* thinking chip */
-.think { border-radius: 12px; }
-.think > summary {
-  list-style: none; display: inline-flex; align-items: center; gap: 8px; padding: 5px 11px 5px 9px; border-radius: 999px; cursor: pointer;
-  font-size: 12.5px; color: var(--muted); background: color-mix(in oklab, var(--elem) 70%, transparent); border: 1px solid var(--line-soft);
-  user-select: none; transition: background var(--fast), color var(--fast);
-}
-.think > summary::-webkit-details-marker { display: none; }
-.think > summary:hover { color: var(--text); }
-.think.active > summary .lbl {
-  background: linear-gradient(90deg, var(--muted) 0%, var(--text) 45%, var(--primary) 55%, var(--muted) 100%);
-  background-size: 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
-  animation: shimmer 1.8s linear infinite;
-}
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: -150% 0; } }
-.think .chev { transition: transform var(--fast) var(--ease); width: 13px; height: 13px; }
-.think[open] .chev { transform: rotate(90deg); }
-.think .think-body { margin: 8px 0 2px 6px; padding-left: 14px; border-left: 2px solid var(--line); color: var(--muted); font-size: 13px; white-space: pre-wrap; max-height: 320px; overflow-y: auto; }
-
-/* tool cards */
-.tool { border-radius: 12px; border: 1px solid var(--line); background: color-mix(in oklab, var(--panel) 75%, transparent); overflow: hidden; transition: border-color var(--fast); }
-.tool:hover { border-color: color-mix(in oklab, var(--border) 60%, transparent); }
-.tool-head { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 12px; text-align: left; font-size: 13px; }
-.tool-ico { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; color: var(--primary); background: var(--primary-soft); flex: none; }
-.tool-ico .i { width: 14px; height: 14px; }
-.tool-name { font-weight: 600; font-family: var(--mono); font-size: 12.5px; }
-.tool-sum { flex: 1; min-width: 0; color: var(--muted); font-family: var(--mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tool-st { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.tool.ok .tool-st { color: var(--success); }
-.tool.err .tool-st { color: var(--error); }
-.tool .chev { width: 14px; height: 14px; color: var(--muted); transition: transform var(--fast) var(--ease); }
-.tool.open .chev { transform: rotate(90deg); }
 .spinner { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--primary-soft); border-top-color: var(--primary); animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.tool-body { display: none; border-top: 1px solid var(--line-soft); }
-.tool.open .tool-body { display: block; }
-.tool-sec { padding: 10px 14px; }
-.tool-sec + .tool-sec { border-top: 1px dashed var(--line-soft); }
-.tool-sec .lbl { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
-.tool-sec pre { margin: 0; font: 12px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto; color: color-mix(in oklab, var(--text) 88%, var(--muted)); }
-.tool-sec.term pre { color: color-mix(in oklab, var(--success) 45%, var(--text)); }
 
 /* system lines */
 .sys { display: flex; align-items: center; gap: 12px; margin: 14px 0 20px; font-size: 11.5px; color: var(--muted); }
@@ -364,33 +325,6 @@ kbd { font: 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; border: 1p
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
 }
-
-/* activity groups — consecutive thinking + tool calls, batched */
-.activity { border-radius: 12px; }
-.activity:not(.single) { border: 1px solid var(--line-soft); background: color-mix(in oklab, var(--panel) 45%, transparent); transition: border-color var(--fast); }
-.activity:not(.single):hover { border-color: var(--line); }
-.activity > summary { list-style: none; display: flex; align-items: center; gap: 10px; padding: 7px 12px; cursor: pointer; font-size: 13px; color: var(--muted); user-select: none; }
-.activity > summary::-webkit-details-marker { display: none; }
-.activity.single > summary { display: none; }
-.act-ico { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; flex: none; color: var(--secondary); background: var(--secondary-soft); }
-.act-ico .i { width: 14px; height: 14px; }
-.act-lbl { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.act-now { color: var(--text); font-family: var(--mono); font-size: 12px; }
-.activity.live .act-now {
-  background: linear-gradient(90deg, var(--text) 0%, var(--primary) 50%, var(--text) 100%);
-  background-size: 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
-  animation: shimmer 2s linear infinite;
-}
-.act-meta { color: var(--muted); }
-.act-st { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--success); }
-.activity.has-err .act-st { color: var(--error); }
-.activity .chev { width: 14px; height: 14px; color: var(--muted); transition: transform var(--fast) var(--ease); }
-.activity[open]:not(.single) > summary .chev { transform: rotate(90deg); }
-.act-body { display: flex; flex-direction: column; gap: 8px; }
-.activity:not(.single) > .act-body { position: relative; padding: 4px 12px 12px 26px; }
-.activity:not(.single) > .act-body::before { content: ""; position: absolute; left: 23px; top: 6px; bottom: 16px; width: 1px; background: var(--line); }
-.activity:not(.single) > .act-body > * { position: relative; }
-.activity[open]:not(.single) > summary { border-bottom: 1px dashed var(--line-soft); margin-bottom: 8px; }
 /* continuation segment of the same turn (after a steer/notice): no repeated avatar */
 .msg.asst.cont .avatar { visibility: hidden; }
 .msg.asst.cont { margin-top: -8px; }
@@ -420,3 +354,106 @@ kbd { font: 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; border: 1p
 /* pending steers: pinned at the bottom of the thread until delivered */
 #steer-tray { display: flex; flex-direction: column; gap: 10px; }
 .msg.user.steer.pending .bubble { opacity: .85; }
+
+/* ══ activity timeline — one visual system for thinking + tool steps ══════════
+   Every row (batch header, thought, tool call) has the SAME anatomy:
+   icon slot on the rail · name · summary (flex) · status (fixed slot, text then glyph) · chevron.
+   Only the batch gets a surface. The rail runs through every icon, header to last step.
+   Details open in a soft lift (no border) aligned to the text column. */
+.activity {
+  --row-pad: 10px; --slot: 20px; --gap: 10px; --col: calc(var(--row-pad) + var(--slot) + var(--gap));
+  --surface: color-mix(in oklab, var(--panel) 80%, var(--bg));
+  --dim: color-mix(in oklab, var(--muted) 72%, var(--text));
+  position: relative; border-radius: 10px;
+}
+.activity:not(.single) { background: var(--surface); border: 1px solid var(--line-soft); padding: 4px 0; }
+
+/* the rail: through every icon, from the header down to the last step */
+.activity:not(.single)[open]::before {
+  content: ""; position: absolute; left: calc(var(--row-pad) + var(--slot) / 2 - .5px);
+  top: 20px; bottom: 20px; width: 1px; z-index: 0;
+  background: color-mix(in oklab, var(--border-subtle) 85%, var(--text) 15%);
+}
+
+/* the shared row */
+.act-head, .think > summary, .tool-head {
+  width: 100%; display: flex; align-items: center; gap: var(--gap);
+  padding: 6px var(--row-pad); min-height: 32px; border-radius: 8px;
+  list-style: none; cursor: pointer; user-select: none; text-align: left;
+  font: 13px/1.35 var(--sans); color: var(--dim);
+  background: none; border: 0; transition: background var(--fast), color var(--fast);
+}
+.act-head::-webkit-details-marker, .think > summary::-webkit-details-marker { display: none; }
+.act-head:hover, .think > summary:hover, .tool-head:hover { background: color-mix(in oklab, var(--elem) 50%, transparent); }
+.activity.single > .act-head { display: none; }
+
+/* icon slot — identical everywhere; its background masks the rail */
+.act-ico, .tool-ico, .think > summary > .i:first-child {
+  width: var(--slot); height: var(--slot); flex: none; display: grid; place-items: center;
+  color: var(--dim); background: var(--surface); border-radius: 6px; position: relative; z-index: 1;
+}
+.act-ico .i, .tool-ico .i { width: 15px; height: 15px; }
+.think > summary > .i:first-child { padding: 2.5px; stroke-width: 1.5; }
+.activity.single .act-ico, .activity.single .tool-ico, .activity.single .think > summary > .i:first-child { background: var(--bg); }
+
+/* name · summary */
+.tool-name, .think > summary .lbl { flex: none; font-weight: 450; color: color-mix(in oklab, var(--text) 78%, var(--muted)); }
+.act-lbl { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); font-weight: 500; }
+.tool-sum, .think-sum { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
+.tool-sum { font: 12px var(--mono); }
+.think-sum { font-size: 12.5px; }
+.act-meta { color: var(--dim); }
+.act-now { font: 12px var(--mono); }
+
+/* status slot — fixed width, right-aligned, glyph last so checks stack in one column */
+.act-st, .tool-st, .think-st {
+  flex: none; min-width: 56px; display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px;
+  font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--dim);
+}
+.act-st .i, .tool-st .i { width: 13px; height: 13px; color: var(--success); }
+.tool.err .tool-st, .tool.err .tool-st .i, .activity.has-err .act-st, .activity.has-err .act-st .i { color: var(--error); }
+.act-head .chev, .think .chev, .tool .chev { width: 13px; height: 13px; flex: none; color: var(--dim); opacity: .75; transition: transform var(--fast) var(--ease); }
+.activity[open]:not(.single) > .act-head .chev, .think[open] > summary .chev, .tool.open .chev { transform: rotate(90deg); }
+
+/* live */
+.tool:not(.ok):not(.err) .tool-ico, .think.active > summary > .i:first-child, .activity.live .act-ico { color: var(--primary); }
+.think.active > summary .lbl, .activity.live .act-now {
+  background: linear-gradient(90deg, var(--dim) 0%, var(--text) 45%, var(--primary) 55%, var(--dim) 100%);
+  background-size: 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: shimmer 1.8s linear infinite;
+}
+.spinner { width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--primary-soft); border-top-color: var(--primary); animation: spin .7s linear infinite; }
+
+.act-body { display: flex; flex-direction: column; }
+
+/* details: one soft lift on the row grid. The lift's box sits 12px left of the
+   text column so the TEXT inside it lines up with the row names above. */
+.think-body, .tool-body { margin: 4px var(--row-pad) 6px calc(var(--col) - 12px); border-radius: 8px;
+  background: color-mix(in oklab, var(--elem) 50%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--text) 4%, transparent); }
+.think[open] > summary .think-sum { visibility: hidden; }
+.think-body {
+  padding: 9px 12px; font-size: 12.8px; line-height: 20px; color: var(--dim);
+  white-space: pre-wrap; max-height: 320px; overflow-y: auto;
+}
+.tool-body { display: none; overflow: hidden; }
+.tool.open .tool-body { display: block; }
+.tool-sec { padding: 9px 12px; }
+.tool-sec + .tool-sec { border-top: 1px solid color-mix(in oklab, var(--text) 9%, transparent); padding-top: 10px; }
+.tool-sec .lbl { font: 600 10px/1 var(--sans); letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin-bottom: 7px; opacity: .75; }
+.tool-sec:has(.cmd) .lbl, .tool-sec.term .lbl { display: none; }
+.tool-sec pre, .tool-sec .blk, .tool-sec .cmd {
+  margin: 0; padding: 0; background: none; border: 0;
+  font: 12px/20px var(--mono); white-space: pre-wrap; word-break: normal; overflow-wrap: anywhere;
+  max-height: 340px; overflow: auto; color: var(--text);
+}
+.tool-sec.out pre { color: var(--dim); }
+.cmd { display: flex; flex-direction: column; }
+.cmd-line { padding-left: 2ch; text-indent: -2ch; }
+.cmd-line .prompt { display: inline-block; width: 2ch; text-indent: 0; color: var(--dim); user-select: none; }
+.cmd-line.cont { padding-left: 4ch; }
+.kv-key { font: 10.5px var(--mono); color: var(--dim); margin: 9px 0 3px; }
+.kv-key:first-child { margin-top: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.kchip { display: inline-flex; border-radius: 6px; overflow: hidden; border: 1px solid var(--line-soft); font: 11px/1 var(--mono); }
+.kchip .ck { padding: 3px 6px; color: var(--dim); background: color-mix(in oklab, var(--elem) 70%, transparent); }
+.kchip .cv { padding: 3px 7px; color: var(--text); }
