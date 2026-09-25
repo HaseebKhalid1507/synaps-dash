@@ -411,3 +411,9 @@ kbd { font: 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; border: 1p
 .msg.user.steer[data-steer="returned"] .bubble,
 .msg.user.steer[data-steer="lost"] .bubble { opacity: .6; }
 @keyframes pop { 0% { transform: scale(.4); } 70% { transform: scale(1.35); } 100% { transform: scale(1); } }
+.msg.user.steer.pending { margin-bottom: 0; }
+.msg.user.steer.pending .bubble { opacity: .85; }
+.msg.user.steer.landed .bubble { animation: landed 1.3s var(--ease); }
+@keyframes landed { 0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--success) 70%, transparent); transform: scale(1.02); } 100% { box-shadow: 0 0 0 10px transparent; transform: none; } }
+.steer-when { font-variant-numeric: tabular-nums; }
+.msg.user.steer[data-steer="delivered"] .steer-when { color: color-mix(in oklab, var(--success) 70%, var(--muted)); }
