@@ -30,6 +30,12 @@ framework and no build step.
 - **Run state in the header**, mirroring the TUI's status span: `● streaming` (pulsing on
   the TUI's ~2s cycle), `⠋ compacting…` / `⠋ connecting…` (the TUI's braille spinner, same
   speed), `○ ready`.
+- **Context meter** in the status line: used vs window, measured exactly like the TUI
+  (`input + cache_read + cache_create` of the last request's `Usage`), same colour thresholds
+  (<50% · <75% · beyond). A fresh attach shows the daemon's estimate (`~`) until the next
+  request reports. The tick marks Synaps's compaction point. Click it for details: left in the
+  window, what's reserved per request (max output, thinking, next tool result, margin), and room
+  before compaction by the daemon's own estimate.
 - **Ambient glow that works with the agent.** The album-coloured background glow drifts
   while a turn is running and settles back when it's idle. The speed ramps up and down
   smoothly (slow start, fastest in the middle, eased finish). Only transform and opacity
@@ -189,6 +195,7 @@ config's hash is unchanged.
 | `test/glow.cjs` | glow speed ramps slow → fast → slow both ways, never snaps, settles and stops at idle, static under reduced motion |
 | `test/tool-views.cjs` | every tool view against real-shaped events, failure detection, folding / truncation / streamed deltas, fallbacks, HTML escaping; then a real turn with real tools |
 | `test/rail.cjs` | rail drawer: exact curves by pausing and seeking the running transitions (close in-out, open expo-out, desktop + mobile), solid panel at every step, no re-wrap, cascade, aria-expanded, mobile layout, reduced motion |
+| `test/context.cjs` | context meter: estimate on attach, measured == the wire's `Usage` after a real turn, budget/flag == a direct assessment, thresholds, formatting, compaction → estimate, popover, layout; plus Enter mid-switch keeps the message |
 | `test/live.cjs` | multi-client: mirror a peer's turn, optionally take over and submit |
 | `test/headless.cjs` | headless DOM smoke check |
 | `test/probe.ts` | raw protocol through the bridge + frame-filter refusals |
@@ -224,6 +231,12 @@ config's hash is unchanged.
   dropped and an `event stream lagged; N dropped` notice. That happens mostly while a huge
   tool call streams its arguments. The session itself loses nothing; `Resync { since_seq }`
   exists for recovery.
+- The `context_assessment` query returns `used_tokens`, `budget_tokens`, `provider_window` and
+  `should_compact`. The budget is the window **minus per-request reserves**: the model's max
+  output (128k for Opus), thinking, the next tool result, and a margin. So an Opus session with
+  a 200k window has a **32k** budget, and Synaps's compaction trigger fires past it. The estimate
+  is conservative: it counts every tool schema even with progressive disclosure, so it reads
+  well above the measured `Usage`.
 
 ## Roadmap
 

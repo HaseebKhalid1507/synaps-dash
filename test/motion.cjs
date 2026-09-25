@@ -11,6 +11,7 @@ async function run(reduced) {
   const errs = []; p.on("pageerror", (e) => errs.push(e.message)); p.on("console", (m) => { if (m.type() === "error") errs.push(m.text()); });
   await p.goto(url);
   await p.waitForFunction(() => document.getElementById("conn").classList.contains("up"), null, { timeout: 15000 });
+  await p.waitForFunction(() => S.sid || /No live sessions/.test(document.getElementById("thread").textContent), null, { timeout: 15000 }); // let the page's own auto-attach settle first
   const oldHash = await p.evaluate(() => location.hash);
   await p.click("#new-session");
   await p.waitForFunction((h) => location.hash && location.hash !== h && !document.getElementById("input").disabled, oldHash, { timeout: 20000 });
