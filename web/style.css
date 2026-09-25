@@ -468,6 +468,103 @@ kbd { font: 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; border: 1p
 .kchip .ck { padding: 3px 6px; color: var(--dim); background: color-mix(in oklab, var(--elem) 70%, transparent); }
 .kchip .cv { padding: 3px 7px; color: var(--text); }
 
+/* ── tool views ── */
+.tool-sec { position: relative; }
+.tool-sec > .tcopy { position: absolute; top: 6px; right: 8px; opacity: 0; }
+.tool-sec:hover > .tcopy, .tcopy:focus-visible { opacity: 1; }
+.tcopy { width: 24px; height: 24px; display: inline-grid; place-items: center; border-radius: 7px; color: var(--dim); flex: none;
+  background: color-mix(in oklab, var(--elem) 80%, transparent); transition: opacity var(--fast), color var(--fast), background var(--fast); }
+.tcopy .i { width: 13px; height: 13px; }
+.tcopy:hover { color: var(--text); background: var(--primary-soft); }
+.tcopy.done { color: var(--success); opacity: 1; }
+.tool-sec.fail .lbl { color: var(--error); opacity: 1; }
+.tool-sec.fail .tout { color: color-mix(in oklab, var(--error) 75%, var(--text)); }
+.fhead { display: flex; align-items: center; gap: 6px; min-width: 0; margin-bottom: 7px; font: 12px var(--mono); }
+.fhead > .i { width: 13px; height: 13px; color: var(--dim); flex: none; }
+.fdir { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; direction: rtl; text-align: left; }
+.fbase { color: var(--text); font-weight: 600; white-space: nowrap; }
+.fcount { margin-left: 4px; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; color: var(--dim); background: color-mix(in oklab, var(--elem) 90%, transparent); white-space: nowrap; }
+.fhead .tcopy { margin-left: auto; opacity: 0; width: 22px; height: 22px; }
+.fhead:hover .tcopy { opacity: 1; }
+.dstat { display: inline-flex; gap: 6px; margin-left: 6px; font-size: 11px; font-weight: 600; }
+.dstat .da { color: var(--success); } .dstat .dd { color: var(--error); }
+/* diff */
+.diff, .cview { font: 12px/19px var(--mono); max-height: 380px; overflow: auto; border-radius: 7px;
+  background: color-mix(in oklab, var(--bg) 55%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--text) 6%, transparent); }
+.diff + .diff { margin-top: 8px; }
+.dl { display: flex; min-width: max-content; }
+.dl .ds { width: 2.2ch; flex: none; text-align: center; color: var(--dim); user-select: none; }
+.dl .dc { white-space: pre; padding-right: 12px; }
+.dl.add { background: color-mix(in oklab, var(--success) 13%, transparent); }
+.dl.add .ds { color: var(--success); }
+.dl.del { background: color-mix(in oklab, var(--error) 13%, transparent); }
+.dl.del .ds { color: var(--error); }
+.dl.add mark { background: color-mix(in oklab, var(--success) 34%, transparent); color: inherit; border-radius: 3px; }
+.dl.del mark { background: color-mix(in oklab, var(--error) 34%, transparent); color: inherit; border-radius: 3px; }
+.dl.ctx .dc { color: color-mix(in oklab, var(--text) 72%, transparent); }
+.more-bar { display: block; width: 100%; padding: 4px 10px; text-align: left; font: 11.5px var(--mono); color: var(--dim);
+  background: color-mix(in oklab, var(--elem) 45%, transparent); border-top: 1px dashed color-mix(in oklab, var(--text) 10%, transparent); transition: color var(--fast), background var(--fast); }
+.more-bar:hover { color: var(--text); background: var(--primary-soft); }
+.more-bar.dfold { border-top: 0; text-align: center; }
+.tout .more-bar { margin: 4px 0; border: 0; border-radius: 6px; }
+/* gutter code (read / write / grep) */
+.cl { display: flex; min-width: max-content; }
+.cl .ln { width: 5ch; flex: none; padding-right: 1.2ch; text-align: right; color: color-mix(in oklab, var(--dim) 70%, transparent); user-select: none; }
+.cl .cc { white-space: pre; padding-right: 12px; }
+.cl.ctx .cc { color: var(--dim); }
+.cl.gap .ln { text-align: center; }
+.cl mark { background: color-mix(in oklab, var(--warning) 32%, transparent); color: var(--text); border-radius: 3px; }
+/* terminal output + ANSI */
+.a-k { color: var(--muted); } .a-r { color: var(--error); } .a-g { color: var(--success); } .a-y { color: var(--warning); }
+.a-b { color: var(--primary); } .a-m { color: var(--secondary); } .a-c { color: var(--info); } .a-w { color: var(--text); }
+.a-bold { font-weight: 700; } .a-dim { opacity: .65; } .a-it { font-style: italic; } .a-ul { text-decoration: underline; }
+/* grep / find / ls */
+.t-note { font: 11px var(--mono); color: var(--dim); margin: 0 0 7px; }
+.t-empty { font: 12px var(--mono); color: var(--dim); font-style: italic; }
+.gfile + .gfile { margin-top: 10px; }
+.gfile .cview { max-height: 260px; }
+.frows { max-height: 320px; overflow: auto; }
+.frow { display: flex; align-items: center; gap: 6px; font: 12px/20px var(--mono); white-space: nowrap; }
+.frow .i { width: 12px; height: 12px; color: var(--dim); flex: none; }
+.frow .fbase { font-weight: 500; }
+.ls { max-height: 340px; overflow: auto; }
+.lsr { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto auto; gap: 8px; align-items: center; font: 12px/21px var(--mono); }
+.lsr .i { width: 13px; height: 13px; color: var(--dim); }
+.lsr.folder .i { color: var(--primary); }
+.lsr.folder .lsn { color: var(--primary); font-weight: 600; }
+.lsn { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lst { color: var(--dim); }
+.lss { color: var(--dim); text-align: right; min-width: 5ch; }
+.lsd { color: color-mix(in oklab, var(--dim) 75%, transparent); font-size: 11px; }
+/* JSON tree */
+.jtree { font: 12px/19px var(--mono); max-height: 380px; overflow: auto; }
+.jt > summary { list-style: none; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
+.jt > summary::-webkit-details-marker { display: none; }
+.jt > summary::before { content: "▸"; color: var(--dim); font-size: 10px; transition: transform var(--fast) var(--ease); }
+.jt[open] > summary::before { transform: rotate(90deg); }
+.jt:not([open]) > summary .jt-c { display: inline; }
+.jt[open] > summary .jt-c { color: var(--dim); opacity: .6; }
+.jt-c { color: var(--dim); font-size: 11px; }
+.jt-b { color: var(--dim); }
+.jt-body { padding-left: 2ch; border-left: 1px solid color-mix(in oklab, var(--text) 8%, transparent); margin-left: .45ch; }
+.jt-row { white-space: pre-wrap; overflow-wrap: anywhere; }
+.jt-key { color: var(--primary); }
+.jt-s { color: var(--success); } .jt-n { color: var(--accent); } .jt-k { color: var(--secondary); }
+.jt-row > .jt { display: inline; }
+.jt-row > .jt[open] { display: block; }
+/* subagent / fetch */
+.chips.first { margin-top: 0; margin-bottom: 8px; }
+.tmd { font-size: 13px; line-height: 1.55; max-height: 340px; overflow: auto; }
+.tdet { margin-top: 8px; }
+.tdet > summary { cursor: pointer; font: 11px var(--mono); color: var(--dim); }
+.tdet > summary:hover { color: var(--text); }
+.tdet pre { margin-top: 6px; }
+.tlink { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font: 12px var(--mono); text-decoration: none; }
+.tlink .i { width: 13px; height: 13px; color: var(--dim); flex: none; }
+.tlink .th { color: var(--text); font-weight: 600; }
+.tlink .tp { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tlink:hover .th { text-decoration: underline; }
+
 /* ══ motion ══════════════════════════════════════════════════════════════════ */
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @keyframes from-right { from { opacity: 0; transform: translate(14px, 4px) scale(.985); } to { opacity: 1; transform: none; } }

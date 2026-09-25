@@ -17,6 +17,8 @@ const P = {
   pencil: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4z"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  link: '<path d="M10 14a5 5 0 0 0 7.1 0l3-3a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 10a5 5 0 0 0-7.1 0l-3 3a5 5 0 0 0 7.1 7.1l1.1-1.1"/>',
   sparkles: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>',
   box: '<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="m3 8 9 5 9-5M12 13v8"/>',
   mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
@@ -716,20 +718,515 @@ function summarize(input) {
   }
   return input[k];
 }
+// ── tool views ────────────────────────────────────────────────────────────────
+// Per-tool rendering over the generic card: a diff for edit, file views for
+// write/read, grouped matches for grep, listings for ls/find, ANSI colour and
+// exit codes for bash, a task card for subagents, a link card for fetch, a
+// JSON tree for JSON results. Unknown tools keep the generic view, and a view
+// that throws falls back to it — a renderer can never break a card.
+// Wire facts (SynapsCLI 0.9.x, verified): ToolResult is {tool_id, result} with
+// NO error flag — failures are text prefixes; read → "N\t…" lines; grep →
+// `grep -rn` (file:line:text, context file-line-text, "--" between groups);
+// ls → `ls -lah`; find → one path per line; edit/write results are one-line
+// summaries ("Edited … — replaced N line(s) with M line(s)", "Wrote N lines …").
+const TOOL_FAIL = /^(Tool execution failed|Tool call denied|Unknown tool)\b|^(error\b|Error:|✗)/;
+function toolFailure(text = "") {
+  if (!TOOL_FAIL.test(text)) return null;
+  const exit = /Command failed \(exit (\d+)\)/.exec(text);
+  if (exit) return `exit ${exit[1]}`;
+  const to = /timed out after (\d+s)/.exec(text);
+  if (to) return `timed out ${to[1]}`;
+  if (/^Tool call denied/.test(text)) return "denied";
+  if (/^Unknown tool/.test(text)) return "unknown tool";
+  return "failed";
+}
+const stripFail = (text) => text.replace(/^Tool execution failed: (Command failed \(exit \d+\):\n?)?/, "");
+const baseName = (n = "") => n.toLowerCase().replace(/^.*[:.]/, "");
+function toolKind(name) {
+  const n = baseName(name);
+  if (/^(edit|multiedit|multi_edit|str_replace)$/.test(n)) return "edit";
+  if (n === "write") return "write";
+  if (n === "read") return "read";
+  if (/^(bash|shell|exec|powershell|run_command)$/.test(n)) return "bash";
+  if (n === "grep") return "grep";
+  if (/^(find|glob)$/.test(n)) return "find";
+  if (n === "ls") return "ls";
+  if (/^subagent(_start)?$/.test(n)) return "subagent";
+  if (/fetch/.test(n)) return "fetch";
+  return null;
+}
+const CODE_EXT = /\.(m?[jt]sx?|cjs|rs|py|go|sh|bash|zsh|fish|rb|java|kts?|c|h|cc|cpp|hpp|cs|swift|lua|toml|ya?ml|json|css|scss|html?|sql|php|vue|svelte)$/i;
+const tildify = (p = "") => String(p).replace(/^\/home\/[^/]+(?=\/|$)/, "~");
+const splitPath = (p = "") => { const i = p.lastIndexOf("/"); return i >= 0 ? [p.slice(0, i + 1), p.slice(i + 1)] : ["", p]; };
+const fileBase = (p = "") => splitPath(String(p))[1] || String(p);
+function copyBtn(get, title = "Copy") {
+  const b = h("button", "tcopy");
+  b.title = title;
+  b.innerHTML = svg("copy");
+  b.onclick = (e) => {
+    e.stopPropagation();
+    navigator.clipboard?.writeText(get()).then(() => { b.classList.add("done"); b.innerHTML = svg("check"); setTimeout(() => { b.classList.remove("done"); b.innerHTML = svg("copy"); }, 1200); }, () => {});
+  };
+  return b;
+}
+function fileHead(path, extra) {
+  const [dir, base] = splitPath(tildify(path));
+  const el = h("div", "fhead");
+  el.innerHTML = `${svg("file")}<span class="fdir">${esc(dir)}</span><span class="fbase">${esc(base)}</span>`;
+  if (extra) el.append(extra);
+  el.append(copyBtn(() => String(path), "Copy path"));
+  return el;
+}
+function moreBar(label, onClick) {
+  const b = h("button", "more-bar", label);
+  b.onclick = (e) => { e.stopPropagation(); onClick(); };
+  return b;
+}
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : /(s|x|z|ch|sh)$/.test(w) ? "es" : "s"}`;
+// Gutter + code rows; long views render `keep` rows and a "show all" bar
+// (eagerly rendering thousands of rows is the slow part, not the data).
+function codeView(lines, { start = 1, nums = null, hl = true, keep = 80, cls = "" } = {}) {
+  const wrap = h("div", `cview ${cls}`.trim());
+  const row = (i) => `<div class="cl"><span class="ln">${nums ? nums[i] : start + i}</span><span class="cc">${(hl ? highlight(lines[i]) : esc(lines[i])) || " "}</span></div>`;
+  const render = (n) => {
+    const rows = [];
+    for (let i = 0; i < Math.min(n, lines.length); i++) rows.push(row(i));
+    wrap.innerHTML = rows.join("");
+    if (lines.length > n) wrap.append(moreBar(`Show ${plural(lines.length - n, "more line")}`, () => render(lines.length)));
+  };
+  render(keep);
+  return wrap;
+}
+
+// Line diff: trim the common prefix/suffix, LCS on the middle (capped — past
+// the cap a changed block renders as all-removed / all-added, still correct).
+function lcs(A, B) {
+  const n = A.length, m = B.length, L = [];
+  for (let i = 0; i <= n; i++) L.push(new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  return L;
+}
+function diffLines(a, b) {
+  let pre = 0, suf = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  const A = a.slice(pre, a.length - suf), B = b.slice(pre, b.length - suf), ops = [];
+  for (let i = 0; i < pre; i++) ops.push([" ", a[i]]);
+  if (A.length * B.length > 250000) {
+    for (const x of A) ops.push(["-", x]);
+    for (const y of B) ops.push(["+", y]);
+  } else {
+    const L = lcs(A, B);
+    let i = 0, j = 0;
+    while (i < A.length && j < B.length) {
+      if (A[i] === B[j]) { ops.push([" ", A[i]]); i++; j++; }
+      else if (L[i + 1][j] >= L[i][j + 1]) ops.push(["-", A[i++]]);
+      else ops.push(["+", B[j++]]);
+    }
+    while (i < A.length) ops.push(["-", A[i++]]);
+    while (j < B.length) ops.push(["+", B[j++]]);
+  }
+  for (let i = a.length - suf; i < a.length; i++) ops.push([" ", a[i]]);
+  return ops;
+}
+// Word-level marks for a removed/added line pair.
+function wordMarks(a, b) {
+  const tok = (s) => s.match(/\w+|\s+|[^\w\s]/g) || [];
+  const ta = tok(a), tb = tok(b);
+  if (ta.length * tb.length > 40000) return [`<mark>${esc(a)}</mark>`, `<mark>${esc(b)}</mark>`];
+  const L = lcs(ta, tb), xa = [], xb = [];
+  let i = 0, j = 0;
+  while (i < ta.length && j < tb.length) {
+    if (ta[i] === tb[j]) { xa.push(esc(ta[i++])); xb.push(esc(tb[j++])); }
+    else if (L[i + 1][j] >= L[i][j + 1]) xa.push(`<mark>${esc(ta[i++])}</mark>`);
+    else xb.push(`<mark>${esc(tb[j++])}</mark>`);
+  }
+  while (i < ta.length) xa.push(`<mark>${esc(ta[i++])}</mark>`);
+  while (j < tb.length) xb.push(`<mark>${esc(tb[j++])}</mark>`);
+  const join = (x) => x.join("").replace(/<\/mark><mark>/g, "");
+  return [join(xa), join(xb)];
+}
+// Unified diff view. Changed runs list removals then additions; paired lines
+// get word marks, the rest syntax colour. Long unchanged runs fold.
+function diffView(oldText, newText, hlOn) {
+  const ops = diffLines(String(oldText).split("\n"), String(newText).split("\n"));
+  const H = (s) => (hlOn ? highlight(s) : esc(s)) || " ";
+  const rows = [];
+  let adds = 0, dels = 0;
+  for (let i = 0; i < ops.length; ) {
+    if (ops[i][0] === " ") { rows.push({ k: "ctx", html: H(ops[i][1]) }); i++; continue; }
+    const D = [], A = [];
+    while (i < ops.length && ops[i][0] !== " ") (ops[i][0] === "-" ? D : A).push(ops[i++][1]);
+    dels += D.length; adds += A.length;
+    const pairs = Math.min(D.length, A.length);
+    const dh = D.map(H), ah = A.map(H);
+    for (let k = 0; k < pairs; k++) { const [x, y] = wordMarks(D[k], A[k]); dh[k] = x || " "; ah[k] = y || " "; }
+    for (const x of dh) rows.push({ k: "del", html: x });
+    for (const y of ah) rows.push({ k: "add", html: y });
+  }
+  // fold unchanged runs: keep 3 lines of context around each change
+  const out = [];
+  for (let i = 0; i < rows.length; ) {
+    if (rows[i].k !== "ctx") { out.push(rows[i++]); continue; }
+    let j = i;
+    while (j < rows.length && rows[j].k === "ctx") j++;
+    const run = rows.slice(i, j), lead = i === 0, trail = j === rows.length;
+    const keepA = lead ? 0 : 3, keepB = trail ? 0 : 3;
+    if (run.length > keepA + keepB + 2) {
+      out.push(...run.slice(0, keepA), { k: "fold", rows: run.slice(keepA, run.length - keepB) }, ...run.slice(run.length - keepB));
+    } else out.push(...run);
+    i = j;
+  }
+  const wrap = h("div", "diff");
+  const sign = { add: "+", del: "−", ctx: " " };
+  const render = (list, limit) => {
+    wrap.innerHTML = "";
+    const shown = list.slice(0, limit);
+    for (const r of shown) {
+      if (r.k === "fold") {
+        const f = moreBar(`⋯ ${plural(r.rows.length, "unchanged line")}`, () => render(list.flatMap((x) => (x === r ? x.rows : [x])), limit + r.rows.length));
+        f.classList.add("dfold");
+        wrap.append(f);
+        continue;
+      }
+      wrap.insertAdjacentHTML("beforeend", `<div class="dl ${r.k}"><span class="ds">${sign[r.k]}</span><span class="dc">${r.html}</span></div>`);
+    }
+    if (list.length > limit) wrap.append(moreBar(`Show ${plural(list.length - limit, "more line")}`, () => render(list, list.length)));
+  };
+  render(out, 200);
+  return { el: wrap, adds, dels };
+}
+function diffStat(adds, dels) {
+  const s = h("span", "dstat");
+  s.innerHTML = `<span class="da">+${adds}</span><span class="dd">−${dels}</span>`;
+  return s;
+}
+
+// ANSI SGR → classes (palette colours); other escapes and control chars are
+// dropped; `\r` progress redraws keep only the last frame of each line.
+const ANSI_FG = { 30: "k", 31: "r", 32: "g", 33: "y", 34: "b", 35: "m", 36: "c", 37: "w", 90: "k", 91: "r", 92: "g", 93: "y", 94: "b", 95: "m", 96: "c", 97: "w" };
+function ansiHtml(text) {
+  text = text.split("\n").map((l) => { l = l.replace(/\r$/, ""); const k = l.lastIndexOf("\r"); return k >= 0 ? l.slice(k + 1) : l; }).join("\n");
+  const re = /\x1b\[([\d;]*)m|\x1b\[[\d;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f]/g;
+  let out = "", last = 0, m, fg = null;
+  const st = new Set();
+  const flush = (s) => {
+    if (!s) return;
+    const cls = [...st, ...(fg ? [`a-${fg}`] : [])];
+    out += cls.length ? `<span class="${cls.join(" ")}">${esc(s)}</span>` : esc(s);
+  };
+  while ((m = re.exec(text))) {
+    flush(text.slice(last, m.index));
+    last = re.lastIndex;
+    if (m[1] === undefined) continue;
+    const codes = m[1] === "" ? [0] : m[1].split(";").map(Number);
+    for (let k = 0; k < codes.length; k++) {
+      const c = codes[k];
+      if (c === 0) { st.clear(); fg = null; }
+      else if (c === 1) st.add("a-bold");
+      else if (c === 2) st.add("a-dim");
+      else if (c === 3) st.add("a-it");
+      else if (c === 4) st.add("a-ul");
+      else if (c === 22) { st.delete("a-bold"); st.delete("a-dim"); }
+      else if (c === 23) st.delete("a-it");
+      else if (c === 24) st.delete("a-ul");
+      else if (ANSI_FG[c]) fg = ANSI_FG[c];
+      else if (c === 39) fg = null;
+      else if (c === 38 || c === 48) k += codes[k + 1] === 5 ? 2 : codes[k + 1] === 2 ? 4 : 0; // 256/truecolor: skip params
+    }
+  }
+  flush(text.slice(last));
+  return out;
+}
+// Terminal output: ANSI colour; long output shows head + tail with a bar.
+function termView(text) {
+  const pre = h("pre", "tout");
+  const lines = text.split("\n");
+  const render = (all) => {
+    if (all || lines.length <= 260) { pre.innerHTML = ansiHtml(text) || " "; return; }
+    pre.innerHTML = ansiHtml(lines.slice(0, 120).join("\n"));
+    pre.append(moreBar(`⋯ ${plural(lines.length - 200, "line")} hidden — show all`, () => render(true)));
+    pre.insertAdjacentHTML("beforeend", ansiHtml(lines.slice(-80).join("\n")));
+  };
+  render(false);
+  return pre;
+}
+function plainView(text) {
+  const pre = h("pre", "tout plain");
+  const lines = text.split("\n");
+  const render = (all) => {
+    if (all || lines.length <= 260) { pre.textContent = text; return; }
+    pre.textContent = lines.slice(0, 120).join("\n");
+    pre.append(moreBar(`⋯ ${plural(lines.length - 200, "line")} hidden — show all`, () => render(true)));
+    pre.append(document.createTextNode(lines.slice(-80).join("\n")));
+  };
+  render(false);
+  return pre;
+}
+
+// grep: BRE-ish patterns → JS for highlighting only (cosmetic; fall back to literal).
+function grepRegex(p) {
+  if (!p) return null;
+  try { return new RegExp(String(p).replace(/\\([|(){}+?])/g, "$1"), "g"); }
+  catch { try { return new RegExp(String(p).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"); } catch { return null; } }
+}
+function markRe(s, re) {
+  if (!re) return esc(s) || " ";
+  let out = "", last = 0, m, guard = 0;
+  re.lastIndex = 0;
+  while ((m = re.exec(s)) && guard++ < 200) {
+    if (m[0] === "") { re.lastIndex++; continue; }
+    out += esc(s.slice(last, m.index)) + `<mark>${esc(m[0])}</mark>`;
+    last = m.index + m[0].length;
+  }
+  return (out + esc(s.slice(last))) || " ";
+}
+function grepView(text, pattern) {
+  if (/^No matches( found)?\.?$/i.test(text.trim())) return h("div", "t-empty", "No matches");
+  const files = new Map();
+  let parsed = 0, hits = 0, cur = null;
+  for (const line of text.split("\n")) {
+    if (line === "--") { cur?.push({ sep: true }); continue; }
+    let m = /^(.+?):(\d+):(.*)$/.exec(line), ctx = false;
+    if (!m) { m = /^(.+?)-(\d+)-(.*)$/.exec(line); ctx = !!m; }
+    if (!m) continue;
+    parsed++;
+    if (!ctx) hits++;
+    if (!files.has(m[1])) files.set(m[1], []);
+    cur = files.get(m[1]);
+    cur.push({ n: m[2], text: m[3], ctx });
+  }
+  if (!parsed) return null;
+  const re = grepRegex(pattern), wrap = h("div", "grep");
+  wrap.append(h("div", "t-note", `${plural(hits, "match")} in ${plural(files.size, "file")}`));
+  let shown = 0;
+  for (const [file, rows] of files) {
+    if (shown++ >= 60) { wrap.append(h("div", "t-note", `+ ${plural(files.size - 60, "more file")}`)); break; }
+    const g = h("div", "gfile");
+    g.append(fileHead(file, h("span", "fcount", String(rows.filter((r) => !r.ctx && !r.sep).length))));
+    const body = h("div", "cview");
+    body.innerHTML = rows.slice(0, 200).map((r) => (r.sep ? `<div class="cl gap"><span class="ln">⋯</span><span class="cc"> </span></div>` : `<div class="cl${r.ctx ? " ctx" : ""}"><span class="ln">${r.n}</span><span class="cc">${markRe(r.text, re)}</span></div>`)).join("");
+    g.append(body);
+    wrap.append(g);
+  }
+  return wrap;
+}
+function rel(p, root) {
+  const r = String(root || "").replace(/\/+$/, "");
+  return r && p.startsWith(r + "/") ? p.slice(r.length + 1) : tildify(p);
+}
+function findView(text, root) {
+  const paths = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!paths.length) return h("div", "t-empty", "Nothing found");
+  const wrap = h("div", "flist");
+  wrap.append(h("div", "t-note", plural(paths.length, "result")));
+  const list = h("div", "frows");
+  const render = (n) => {
+    list.innerHTML = paths.slice(0, n).map((p) => { const [d, b] = splitPath(rel(p, root)); return `<div class="frow">${svg("file")}<span class="fdir">${esc(d)}</span><span class="fbase">${esc(b)}</span></div>`; }).join("");
+    if (paths.length > n) list.append(moreBar(`Show ${plural(paths.length - n, "more result")}`, () => render(paths.length)));
+  };
+  render(150);
+  wrap.append(list);
+  return wrap;
+}
+const LS_RE = /^([-dlbcps])[-rwxsStT]{9}[.+@]?\s+\d+\s+\S+\s+\S+\s+(\S+)\s+(\w{3}\s+\d{1,2}\s+(?:\d{1,2}:\d{2}|\d{4}))\s(.+)$/;
+function lsView(text) {
+  const rows = [];
+  for (const line of text.split("\n")) {
+    const m = LS_RE.exec(line);
+    if (m && m[4] !== "." && m[4] !== "..") rows.push({ t: m[1], size: m[2], date: m[3].replace(/\s+/g, " "), name: m[4] });
+  }
+  if (!rows.length) return null;
+  rows.sort((a, b) => (a.t === "d") === (b.t === "d") ? a.name.localeCompare(b.name) : a.t === "d" ? -1 : 1);
+  const wrap = h("div", "ls");
+  wrap.innerHTML = rows.map((r) => {
+    const [name, target] = r.t === "l" ? r.name.split(" -> ") : [r.name];
+    const ico = r.t === "d" ? "folder" : r.t === "l" ? "link" : "file";
+    return `<div class="lsr ${ico}">${svg(ico)}<span class="lsn">${esc(name)}${r.t === "d" ? "/" : ""}${target ? `<span class="lst"> → ${esc(target)}</span>` : ""}</span><span class="lss">${r.t === "d" ? "" : esc(r.size)}</span><span class="lsd">${esc(r.date)}</span></div>`;
+  }).join("");
+  return wrap;
+}
+// JSON tree: nodes deeper than the first level render lazily on first open.
+function jsonTree(v, depth = 0) {
+  if (v === null || typeof v !== "object") {
+    const t = v === null ? "k" : typeof v === "string" ? "s" : typeof v === "number" ? "n" : "k";
+    const s = typeof v === "string" ? JSON.stringify(v.length > 400 ? v.slice(0, 400) + "…" : v) : String(v);
+    return h("span", `jt-${t}`, s);
+  }
+  const arr = Array.isArray(v), keys = arr ? v.map((_, i) => i) : Object.keys(v);
+  const d = h("details", "jt");
+  const sum = h("summary");
+  sum.innerHTML = `<span class="jt-b">${arr ? "[" : "{"}</span><span class="jt-c">${arr ? plural(keys.length, "item") : plural(keys.length, "key")}</span><span class="jt-b">${arr ? "]" : "}"}</span>`;
+  d.append(sum);
+  let built = false;
+  const build = () => {
+    if (built) return;
+    built = true;
+    const body = h("div", "jt-body");
+    for (const k of keys.slice(0, 200)) {
+      const row = h("div", "jt-row");
+      if (!arr) row.append(h("span", "jt-key", k), document.createTextNode(": "));
+      row.append(jsonTree(v[k], depth + 1));
+      body.append(row);
+    }
+    if (keys.length > 200) body.append(h("div", "t-note", `+ ${keys.length - 200} more`));
+    d.append(body);
+  };
+  d.addEventListener("toggle", () => { if (d.open) build(); });
+  if (depth < 1) { d.open = true; build(); }
+  return d;
+}
+function jsonOut(text) {
+  const s = text.trim();
+  if (!/^[[{]/.test(s) || s.length > 400000) return null;
+  try { const w = h("div", "jtree"); w.append(jsonTree(JSON.parse(s))); return w; } catch { return null; }
+}
+function chipRow(pairs) {
+  const chips = h("div", "chips");
+  for (const [k, val] of pairs) {
+    if (val == null || val === "") continue;
+    const c = h("span", "kchip");
+    c.append(h("span", "ck", k), h("span", "cv", String(val)));
+    chips.append(c);
+  }
+  return chips.children.length ? chips : null;
+}
+const httpUrl = (u) => { try { const x = new URL(u); return /^https?:$/.test(x.protocol) ? x : null; } catch { return null; } };
+
+// input(t, v) fills t.inp (return false → generic); output(t, text, fail)
+// returns an Element, "hide" (success line already folded into the summary),
+// or null (→ generic). summary(v) → header text.
+const TOOL_VIEWS = {
+  edit: {
+    summary: (v) => fileBase(v.path || v.file_path),
+    input(t, v) {
+      const path = v.path || v.file_path;
+      const edits = Array.isArray(v.edits) ? v.edits : [{ old_string: v.old_string, new_string: v.new_string }];
+      if (!path || edits.some((e) => typeof e?.old_string !== "string" || typeof e?.new_string !== "string")) return false;
+      const hl = CODE_EXT.test(path);
+      let adds = 0, dels = 0;
+      const views = edits.map((e) => { const d = diffView(e.old_string, e.new_string, hl); adds += d.adds; dels += d.dels; return d.el; });
+      t.inp.append(fileHead(path, diffStat(adds, dels)));
+      for (const el of views) t.inp.append(el);
+      const c = chipRow([["replace_all", v.replace_all ? "true" : null]]);
+      if (c) t.inp.append(c);
+      t.sum.textContent = `${fileBase(path)}  +${adds} −${dels}`;
+    },
+    output: (t, text, fail) => (fail ? null : "hide"),
+  },
+  write: {
+    summary: (v) => fileBase(v.path || v.file_path),
+    input(t, v) {
+      const path = v.path || v.file_path;
+      if (!path || typeof v.content !== "string") return false;
+      const lines = v.content.replace(/\n$/, "").split("\n");
+      t.inp.append(fileHead(path, h("span", "fcount", plural(lines.length, "line"))), codeView(lines, { hl: CODE_EXT.test(path), keep: 40 }));
+      t.sum.textContent = `${fileBase(path)} · ${plural(lines.length, "line")}`;
+    },
+    output: (t, text, fail) => (fail ? null : "hide"),
+  },
+  read: {
+    summary: (v) => fileBase(v.path || v.file_path),
+    input(t, v) {
+      const path = v.path || v.file_path;
+      if (!path) return false;
+      const from = Number(v.offset) || 0, lim = Number(v.limit) || 0;
+      const range = lim ? `lines ${from + 1}–${from + lim}` : from ? `from line ${from + 1}` : null;
+      t.inp.append(fileHead(path, range ? h("span", "fcount", range) : null));
+      if (range) t.sum.textContent = `${fileBase(path)} · ${range}`;
+    },
+    output(t, text, fail) {
+      if (fail) return null;
+      const src = text.replace(/\n$/, "").split("\n"), nums = [], lines = [];
+      let hitsN = 0;
+      for (const l of src) { const m = /^\s*(\d+)\t(.*)$/.exec(l); if (m) { hitsN++; nums.push(m[1]); lines.push(m[2]); } else { nums.push(""); lines.push(l); } }
+      if (hitsN < src.length * 0.6) return null; // not the numbered format → generic
+      const path = t.inputV?.path || t.inputV?.file_path || "";
+      return codeView(lines, { nums, hl: CODE_EXT.test(path), keep: 120 });
+    },
+  },
+  bash: {
+    output: (t, text) => termView(text),
+  },
+  grep: {
+    summary: (v) => `${v.pattern ?? ""}${v.path ? `  in ${tildify(v.path)}` : ""}`,
+    output: (t, text, fail) => (fail ? null : grepView(text, t.inputV?.pattern)),
+  },
+  find: {
+    summary: (v) => `${v.pattern ?? v.name ?? ""}${v.path ? `  in ${tildify(v.path)}` : ""}`,
+    output: (t, text, fail) => (fail ? null : findView(text, t.inputV?.path)),
+  },
+  ls: {
+    output: (t, text, fail) => (fail ? null : lsView(text)),
+  },
+  subagent: {
+    summary: (v) => `${v.agent || v.role || "agent"}: ${String(v.task || "").split("\n")[0]}`,
+    input(t, v) {
+      if (typeof v.task !== "string") return false;
+      const c = chipRow([["agent", v.agent], ["role", v.role], ["model", v.model], ["timeout", v.timeout ? `${v.timeout}s` : null], ["writes", v.write_policy?.mode]]);
+      if (c) { c.classList.add("first"); t.inp.append(c); }
+      const task = h("div", "md tmd");
+      task.innerHTML = md(v.task);
+      t.inp.append(h("div", "kv-key", "task"), task);
+      if (typeof v.system_prompt === "string" && v.system_prompt) {
+        const d = h("details", "tdet");
+        d.append(h("summary", null, `system prompt · ${plural(v.system_prompt.split("\n").length, "line")}`), h("pre", "blk", v.system_prompt));
+        t.inp.append(d);
+      }
+    },
+    output(t, text, fail) {
+      if (fail || !text.trim() || jsonOut(text)) return null;
+      const d = h("div", "md tmd");
+      d.innerHTML = md(text);
+      return d;
+    },
+  },
+  fetch: {
+    summary: (v) => { const u = httpUrl(v.url); return u ? `${u.hostname}${u.pathname === "/" ? "" : u.pathname}` : String(v.url ?? ""); },
+    input(t, v) {
+      const u = httpUrl(v.url);
+      if (!u) return false;
+      const a = h("a", "tlink");
+      a.href = u.href; a.target = "_blank"; a.rel = "noopener noreferrer";
+      a.innerHTML = `${svg("globe")}<span class="th">${esc(u.hostname)}</span><span class="tp">${esc(u.pathname + u.search)}</span>`;
+      t.inp.append(a);
+      const rest = Object.entries(v).filter(([k]) => k !== "url");
+      const c = chipRow(rest.map(([k, x]) => [k, typeof x === "object" ? JSON.stringify(x) : x]));
+      if (c) t.inp.append(c);
+    },
+  },
+};
+function renderToolOutput(t) {
+  const text = t.outRaw ?? "";
+  const fail = toolFailure(text);
+  const body = fail ? stripFail(text) : text;
+  const view = TOOL_VIEWS[t.kind];
+  let el = null;
+  if (view?.output) { try { el = view.output(t, body, fail); } catch (e) { console.warn("synaps-dash: tool view", t.kind, e); el = null; } }
+  if (el === "hide") { t.outSec.classList.add("hidden"); updateGroup(t.group); return; }
+  if (!el) el = (!fail && jsonOut(body)) || (t.kind === "bash" ? termView(body) : plainView(body));
+  t.outView.replaceChildren(el);
+  t.outSec.classList.toggle("fail", !!fail);
+  t.outSec.classList.remove("hidden");
+  updateGroup(t.group);
+}
+
 function toolCard(id, name, input) {
   const c = asst();
   closeThinking(c);
   if (c.text) { c.text._live = false; markDirty(c.text); }
   const card = h("div", "tool");
-  card.innerHTML = `<button class="tool-head"><span class="tool-ico">${svg(toolIcon(name))}</span><span class="tool-name"></span><span class="tool-sum"></span><span class="tool-st"><span class="spinner"></span></span>${svg("chev", "i chev")}</button><div class="tool-body"><div class="tool-sec in"><div class="lbl">Input</div><div class="in-view"></div></div><div class="tool-sec out ${/bash|shell|exec/.test(name) ? "term" : ""} hidden"><div class="lbl">Output</div><pre></pre></div></div>`;
+  card.innerHTML = `<button class="tool-head"><span class="tool-ico">${svg(toolIcon(name))}</span><span class="tool-name"></span><span class="tool-sum"></span><span class="tool-st"><span class="spinner"></span></span>${svg("chev", "i chev")}</button><div class="tool-body"><div class="tool-sec in"><div class="lbl">Input</div><div class="in-view"></div></div><div class="tool-sec out ${/bash|shell|exec/.test(name) ? "term" : ""} hidden"><div class="lbl">Output</div><div class="out-view"></div></div></div>`;
   card.querySelector(".tool-name").textContent = name || "tool";
   card.querySelector(".tool-head").onclick = () => toggleTool(card);
   if (!S.replaying) card.classList.add("row-in");
   const g = groupFor(c);
   add(card, g.body);
-  const t = { card, name, start: performance.now(), inRaw: "", outRaw: "", done: false,
+  const t = { card, name, kind: toolKind(name), start: performance.now(), inRaw: "", outRaw: "", done: false,
     sum: card.querySelector(".tool-sum"), st: card.querySelector(".tool-st"),
-    inp: card.querySelector(".in-view"), out: card.querySelector(".out pre"), outSec: card.querySelector(".out") };
+    inp: card.querySelector(".in-view"), outView: card.querySelector(".out-view"), outSec: card.querySelector(".out") };
+  card.querySelector(".tool-sec.in").append(copyBtn(() => { const v = t.inputV; return v && typeof v === "object" ? (typeof v.command === "string" ? v.command : JSON.stringify(v, null, 2)) : String(v ?? t.inRaw); }, "Copy input"));
+  t.outSec.append(copyBtn(() => stripFail(t.outRaw), "Copy output"));
   c.tools.set(id, t);
   S.turnTools.set(id, t);
   c.last = "tool";
@@ -745,8 +1242,19 @@ function toolCard(id, name, input) {
 function setToolInput(t, input) {
   t.sum.textContent = summarize(input);
   const v = parseInput(input);
+  t.inputV = v;
   const box = t.inp;
   box.innerHTML = "";
+  const view = TOOL_VIEWS[t.kind];
+  if (view && v && typeof v === "object" && !Array.isArray(v)) {
+    try { if (view.summary) t.sum.textContent = view.summary(v); } catch {}
+    if (view.input) {
+      try {
+        if (view.input(t, v) !== false) { if (t.outRaw) renderToolOutput(t); updateGroup(t.group); return; }
+      } catch (e) { console.warn("synaps-dash: tool view", t.kind, e); }
+      box.innerHTML = ""; // view declined or threw → generic
+    }
+  }
   if (v == null || typeof v !== "object") { box.append(h("pre", "blk", String(v ?? ""))); updateGroup(t.group); return; }
   const k = primaryKey(v);
   if (k === "command" || k === "cmd") {
@@ -778,9 +1286,10 @@ function setToolInput(t, input) {
 }
 function setToolOutput(t, text) {
   t.outRaw = text;
-  const lines = text.split("\n");
-  t.out.textContent = lines.length > 400 ? lines.slice(0, 400).join("\n") + `\n… ${lines.length - 400} more lines` : text;
-  t.outSec.classList.remove("hidden");
+  // Streamed output (tool_result_delta) arrives in many small pieces; rich views
+  // re-parse the whole text, so coalesce to one render per frame.
+  if (t._outRaf) return;
+  t._outRaf = requestAnimationFrame(() => { t._outRaf = 0; renderToolOutput(t); });
 }
 function toolDone(t, cls = "ok", label) {
   if (t.done) return;
@@ -1194,7 +1703,7 @@ function onStream(s, ts) {
       case "tool_use_delta": { const t = S.turnTools.get(s.tool_id); if (t) { t.inRaw += s.delta; t.sum.textContent = t.inRaw.slice(0, 200); updateGroup(t.group); } return; }
       case "tool_use": { const t = S.turnTools.get(s.tool_id) ?? toolCard(s.tool_id, s.tool_name); setToolInput(t, s.input); return; }
       case "tool_result_delta": { const t = S.turnTools.get(s.tool_id); if (t) setToolOutput(t, t.outRaw + s.delta); return; }
-      case "tool_result": { const t = S.turnTools.get(s.tool_id); if (t) { setToolOutput(t, s.result); toolDone(t, /^(error|Error:|✗)/.test(s.result || "") ? "err" : "ok"); } if (S.cur) S.cur.last = "tool"; return; }
+      case "tool_result": { const t = S.turnTools.get(s.tool_id); if (t) { const fail = toolFailure(s.result || ""); setToolOutput(t, s.result); toolDone(t, fail ? "err" : "ok", fail || undefined); } if (S.cur) S.cur.last = "tool"; return; }
     }
   } else if (s.kind === "session") {
     if (s.session === "usage" && s.model) $("st-model").textContent = s.model.replace(/^.*\//, "");
