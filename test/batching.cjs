@@ -12,8 +12,9 @@ const fs = require("fs");
   p.on("pageerror", (e) => errs.push(e.message));
   await p.goto(url);
   await p.waitForFunction(() => document.getElementById("conn").classList.contains("up"), null, { timeout: 15000 });
+  const oldHash = await p.evaluate(() => location.hash);
   await p.click("#new-session");
-  await p.waitForFunction(() => !document.getElementById("input").disabled, null, { timeout: 20000 });
+  await p.waitForFunction((h) => location.hash && location.hash !== h && !document.getElementById("input").disabled, oldHash, { timeout: 20000 });
   await p.fill("#input", "Use bash for each of these as SEPARATE tool calls, one after another: `sleep 2 && pwd`, `sleep 2 && ls /tmp | head -3`, `sleep 2 && uname -s`, `sleep 2 && date +%Y`. After all four, reply with one short sentence.");
   await p.press("#input", "Enter");
   // steer once the first tool card exists

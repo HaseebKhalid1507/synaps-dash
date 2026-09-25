@@ -13,8 +13,9 @@ const fs = require("fs");
   page.on("response", (r) => { if (r.status() >= 400) errs.push(`HTTP ${r.status()} ${r.url().replace(/token=[0-9a-f]+/, "token=…")}`); });
   await page.goto(url);
   await page.waitForFunction(() => document.getElementById("conn").classList.contains("up"), null, { timeout: 15000 });
+  const oldHash = await page.evaluate(() => location.hash);
   await page.click("#new-session");
-  await page.waitForFunction(() => !document.getElementById("input").disabled, null, { timeout: 20000 });
+  await page.waitForFunction((h) => location.hash && location.hash !== h && !document.getElementById("input").disabled, oldHash, { timeout: 20000 });
   const pal = await page.evaluate(() => ({
     primary: getComputedStyle(document.documentElement).getPropertyValue("--primary").trim(),
     bg: getComputedStyle(document.documentElement).getPropertyValue("--bg").trim(),
