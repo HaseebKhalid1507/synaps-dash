@@ -464,6 +464,7 @@ function finishAsst() {
   S.split = false;
   if (!c) return;
   closeThinking(c);
+  if (c.text) { c.text._live = false; markDirty(c.text); }
   dropCaret(c);
   closeGroup(c);
   c.root.classList.remove("live");
@@ -492,18 +493,59 @@ function appendThinking(text) {
   c.last = "think";
 }
 
-const mdDirty = new Set();
-let mdQueued = false;
-function flushMd() {
-  mdQueued = false;
-  for (const n of mdDirty) {
-    n.innerHTML = md(n._raw);
-    if (n._live) n.insertAdjacentHTML("beforeend", '<span class="caret"></span>');
+// ── streaming text: paced reveal + incremental markdown ────────────────────────
+// Deltas arrive in ~10-char clumps every ~60ms; painting them as they land steps
+// the text at ~17Hz (grows on ~1 frame in 4). Instead we buffer and reveal
+// backlog/REVEAL_LAG_MS worth each frame: ~3 chars EVERY frame, trailing the
+// wire by ~140ms, catching up faster after a burst. When a block ends, the rest
+// drains within a few frames. Replay and reduced-motion render instantly.
+const REVEAL_LAG_MS = 140;
+const typers = new Set();
+let typerRaf = 0;
+function markDirty(n) {
+  typers.add(n);
+  if (!typerRaf) typerRaf = requestAnimationFrame(typeTick);
+}
+let lastTick = 0;
+function typeTick(now) {
+  typerRaf = 0;
+  const dt = Math.min(64, now - (lastTick || now - 16.7));
+  lastTick = now;
+  for (const n of typers) {
+    const target = n._raw.length;
+    let shown = n._shown || 0;
+    if (n._instant || !motion()) shown = target;
+    else if (shown < target) {
+      const backlog = target - shown;
+      const lag = n._live ? REVEAL_LAG_MS : 70; // a finished block drains fast
+      shown = Math.min(target, shown + Math.max(1, Math.ceil(backlog * dt / lag)));
+    }
+    n._shown = shown;
+    renderMd(n);
+    if (shown >= target) typers.delete(n);
   }
-  mdDirty.clear();
+  if (typers.size) typerRaf = requestAnimationFrame(typeTick);
+  else lastTick = 0;
   follow();
 }
-function markDirty(n) { mdDirty.add(n); if (!mdQueued) { mdQueued = true; requestAnimationFrame(flushMd); } }
+// Completed paragraphs render once and freeze; only the paragraph still being
+// written re-renders per frame (never split inside a ``` fence).
+function renderMd(n) {
+  const text = n._raw.slice(0, n._shown);
+  if (!n._stable) {
+    n.textContent = "";
+    n._stable = h("div", "md-stable");
+    n._tail = h("div", "md-tail");
+    n.append(n._stable, n._tail);
+    n._cut = 0;
+  }
+  let cut = text.lastIndexOf("\n\n");
+  while (cut > 0 && ((text.slice(0, cut).match(/^```/gm) || []).length % 2)) cut = text.lastIndexOf("\n\n", cut - 1);
+  if (cut < 0) cut = 0;
+  if (cut !== n._cut) { n._stable.innerHTML = cut ? md(text.slice(0, cut)) : ""; n._cut = cut; }
+  const typing = n._live || n._shown < n._raw.length;
+  n._tail.innerHTML = md(text.slice(cut)) + (typing && !n._instant ? '<span class="caret"></span>' : "");
+}
 
 function appendText(text) {
   const c = asst();
@@ -517,6 +559,7 @@ function appendText(text) {
   c.textRaw += text;
   c.text._raw = c.textRaw;
   c.text._live = !S.replaying;
+  if (S.replaying) c.text._instant = true;
   c.last = "text";
   markDirty(c.text);
 }
@@ -953,7 +996,7 @@ function onStream(s, ts) {
   if (s.kind === "llm") {
     switch (s.llm) {
       case "response_start": asst(); return;
-      case "response_reset": if (S.cur?.text) { S.cur.text.remove(); S.cur.text = null; S.cur.textRaw = ""; } return;
+      case "response_reset": if (S.cur?.text) { typers.delete(S.cur.text); S.cur.text.remove(); S.cur.text = null; S.cur.textRaw = ""; } return;
       case "thinking": return appendThinking(s.text);
       case "text": return appendText(s.text);
       case "tool_use_start": toolCard(s.tool_id, s.tool_name); return;
