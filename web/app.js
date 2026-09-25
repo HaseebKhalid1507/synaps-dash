@@ -195,14 +195,37 @@ const RunState = (() => {
 const Ctx = (() => {
   const btn = $("st-ctx"), fill = btn.querySelector(".ctx-fill"), tick = btn.querySelector(".ctx-tick"), txt = btn.querySelector(".ctx-txt"), pop = $("ctx-pop");
   // measured/estimate: token counts; budget/window from the assessment (window falls back to the view)
-  let c = { measured: null, measuredAt: 0, estimate: null, budget: null, window: null, shouldCompact: false };
+  const fresh = () => ({ measured: null, measuredAt: 0, estimate: null, calibrated: null, calFrom: null, budget: null, window: null, shouldCompact: false });
+  let c = fresh();
   let pending = 0, qTimer = 0, gen = 0;
   const fmt = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(n % 1e6 ? 2 : 0)}M` : n >= 1e3 ? `${+(n / 1e3).toFixed(n >= 1e5 ? 0 : 1)}k` : String(Math.round(n)));
-  const used = () => c.measured ?? c.estimate;
+  // The daemon's estimate is conservative (every tool schema, padded per message):
+  // on a big session it reads ~60% high (1.23M est. vs 768k measured), so it is
+  // never the headline. Headline = measured (a Usage this tab saw), else
+  // calibrated = estimate × this session's last measured/estimate ratio
+  // (remembered per session in localStorage, so it survives a refresh), else
+  // unknown ("—"), like the TUI, which shows nothing until a request reports.
+  const used = () => c.measured ?? c.calibrated;
+  const STORE = "sd.ctx";
+  const remembered = (sid) => { try { return JSON.parse(localStorage.getItem(STORE) || "{}")[sid] || null; } catch { return null; } };
+  function remember() {
+    if (!S.sid || c.measured == null || !c.estimate) return;
+    try {
+      const all = JSON.parse(localStorage.getItem(STORE) || "{}");
+      all[S.sid] = { m: c.measured, e: c.estimate, t: Date.now() };
+      const keep = Object.entries(all).sort((a, b) => b[1].t - a[1].t).slice(0, 50); // bounded
+      localStorage.setItem(STORE, JSON.stringify(Object.fromEntries(keep)));
+    } catch {}
+  }
+  function calibrate() {
+    const r = c.measured == null && c.estimate ? remembered(S.sid) : null;
+    c.calFrom = r && r.e > 0 && r.m > 0 ? r : null;
+    c.calibrated = c.calFrom ? Math.round(c.estimate * (c.calFrom.m / c.calFrom.e)) : null;
+  }
   const win = () => c.window || S.view?.context_window || 0;
   // A new attach bumps `gen`: a query answer from an older socket (it can
   // vanish mid-switch) is ignored, and `pending` can never wedge the meter.
-  function reset() { gen++; pending = 0; c = { measured: null, measuredAt: 0, estimate: null, budget: null, window: null, shouldCompact: false }; render(); }
+  function reset() { gen++; pending = 0; c = fresh(); render(); }
   // Ask the daemon for the assessment (debounced; one in flight at a time).
   function refresh() {
     clearTimeout(qTimer);
@@ -219,6 +242,7 @@ const Ctx = (() => {
         c.budget = v.budget_tokens;
         c.window = v.provider_window || c.window;
         c.shouldCompact = !!v.should_compact;
+        calibrate(); remember(); // re-pair measured with the end-of-turn estimate
         render();
       });
     }, 250);
@@ -226,37 +250,49 @@ const Ctx = (() => {
   function usage(s) {
     const n = (s.input_tokens || 0) + (s.cache_read_input_tokens || 0) + (s.cache_creation_input_tokens || 0);
     if (!n) return;
-    c.measured = n; c.measuredAt = Date.now();
+    c.measured = n; c.measuredAt = Date.now(); c.calibrated = null; c.calFrom = null;
+    remember();
     render();
   }
-  function stale() { c.measured = null; refresh(); } // history changed shape (compaction / clear)
+  function stale() { c.measured = null; c.calibrated = null; refresh(); } // history changed shape (compaction / clear)
   function render() {
     const u = used(), w = win();
-    btn.classList.toggle("hidden", !S.sid || u == null || !w);
-    if (!S.sid || u == null || !w) { closePop(); return; }
-    const ratio = Math.min(1, u / w);
+    // Shown once we know the window and have any reading; "—" until measured/calibrated.
+    const show = !!S.sid && !!w && (u != null || c.estimate != null);
+    btn.classList.toggle("hidden", !show);
+    if (!show) { closePop(); return; }
+    const unk = u == null;
+    const ratio = unk ? 0 : Math.min(1, u / w);
     btn.classList.remove("lo", "mid", "hi");
-    btn.classList.add(ratio < 0.5 ? "lo" : ratio < 0.75 ? "mid" : "hi");
+    if (!unk) btn.classList.add(ratio < 0.5 ? "lo" : ratio < 0.75 ? "mid" : "hi");
+    btn.classList.toggle("unk", unk);
     btn.classList.toggle("compact", c.shouldCompact);
-    btn.classList.toggle("est", c.measured == null);
+    btn.classList.toggle("est", !unk && c.measured == null);
     fill.style.transform = `scaleX(${ratio.toFixed(4)})`;
     const b = c.budget;
     tick.classList.toggle("hidden", b == null || b <= 0 || b >= w);
     if (b != null && b > 0 && b < w) tick.style.left = `${((b / w) * 100).toFixed(2)}%`;
-    txt.textContent = `${fmt(u)} / ${fmt(w)}`;
-    const left = Math.max(0, w - u);
+    txt.textContent = `${unk ? "—" : fmt(u)} / ${fmt(w)}`;
+    const left = unk ? null : Math.max(0, w - u);
     btn.title = "";
-    btn.setAttribute("aria-label", `Context: ${fmt(u)} of ${fmt(w)} used (${Math.round(ratio * 100)}%), ${fmt(left)} left${c.shouldCompact ? ", compaction advised" : ""}. Show details.`);
+    btn.setAttribute("aria-label", unk
+      ? `Context: not measured yet (window ${fmt(w)})${c.shouldCompact ? ", compaction advised" : ""}. Show details.`
+      : `Context: ${fmt(u)} of ${fmt(w)} used (${Math.round(ratio * 100)}%), ${fmt(left)} left${c.shouldCompact ? ", compaction advised" : ""}. Show details.`);
     if (!pop.classList.contains("hidden")) fillPop();
   }
   function fillPop() {
-    const u = used(), w = win(), left = Math.max(0, w - u), b = c.budget;
+    const u = used(), w = win(), b = c.budget, unk = u == null;
     const row = (k, v, cls = "") => `<div class="cp-row ${cls}"><span class="cp-k">${esc(k)}</span><span class="cp-v">${v}</span></div>`;
-    const pct = Math.round(Math.min(1, u / w) * 100);
+    const since = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`; };
     let html = `<div class="cp-h">Context</div>`;
-    const estNote = c.measured != null && c.estimate != null && Math.abs(c.estimate - c.measured) >= 500 ? ` <span class="cp-dim">· daemon estimate ~${esc(fmt(c.estimate))}</span>` : "";
-    html += row("Used", `${esc(fmt(u))} <span class="cp-dim">of ${esc(fmt(w))} · ${pct}%</span>${estNote}`);
-    html += row("Left in window", esc(fmt(left)));
+    if (unk) {
+      html += row("Used", `— <span class="cp-dim">not measured yet</span>`);
+    } else {
+      const pct = Math.round(Math.min(1, u / w) * 100);
+      html += row("Used", `${c.measured == null ? "~" : ""}${esc(fmt(u))} <span class="cp-dim">of ${esc(fmt(w))} · ${pct}%</span>`);
+      html += row("Left in window", esc(fmt(Math.max(0, w - u))));
+    }
+    if (c.estimate != null) html += row("Daemon estimate", `~${esc(fmt(c.estimate))} <span class="cp-dim">conservative</span>`);
     if (b != null) {
       // Same basis as Synaps's trigger: its estimate vs its budget (never the
       // measured count against the estimate-derived budget).
@@ -267,8 +303,12 @@ const Ctx = (() => {
         : row("Compaction point", `${esc(fmt(Math.max(0, b)))} <span class="cp-dim">· passed by ${esc(fmt(Math.max(0, e - b)))}</span>`, "warn");
     }
     html += row("Compaction", c.shouldCompact ? "advised" : "not yet", c.shouldCompact ? "warn" : "");
-    const ago = c.measured != null ? Math.max(0, Math.round((Date.now() - c.measuredAt) / 1000)) : null;
-    html += `<div class="cp-foot">${c.measured != null ? `Measured on the last request${ago > 1 ? ` · ${ago < 60 ? `${ago}s` : `${Math.round(ago / 60)}m`} ago` : ""}` : "Estimated by the daemon · measured once the next request runs"}</div>`;
+    const foot = c.measured != null
+      ? `Measured on the last request${Date.now() - c.measuredAt > 1500 ? ` · ${since(c.measuredAt)} ago` : ""}`
+      : c.calFrom
+        ? `Estimated from this session's last measurement (${esc(fmt(c.calFrom.m))}, ${since(c.calFrom.t)} ago) · exact on the next request`
+        : "Not measured in this tab yet · exact on the next request";
+    html += `<div class="cp-foot">${foot}</div>`;
     pop.innerHTML = html;
   }
   function openPop() { fillPop(); pop.classList.remove("hidden"); btn.setAttribute("aria-expanded", "true"); anim(pop, [{ opacity: 0, transform: "translateY(6px) scale(.98)" }, { opacity: 1, transform: "none" }], { duration: 220, easing: EASE.out }); }
