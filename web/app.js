@@ -767,32 +767,39 @@ function ago(iso) {
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
 }
-// The rail lists LIVE sessions (in the daemon now) and, below them, RECENT
-// sessions that live only on disk. Clicking a live one attaches; clicking a
-// recent one resumes it (attach:create + continue_session) and it becomes live.
+// The rail lists LIVE sessions (someone attached now, clients>0) and, below
+// them, RECENT sessions nobody's on: in-daemon-but-detached (0 clients — whether
+// lifecycle=parked or a journal-less session the daemon won't park) plus
+// sessions that live only on disk. Clicking an in-daemon one attaches (it's in
+// memory); clicking a disk-only one resumes it (attach:create + continue).
 function railItems() {
-  const live = [...S.sessions].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-  // The attached session is live even if the daemon's session_list hasn't caught
-  // up yet (just-resumed / just-created) — synthesize it so it never flickers in
-  // Recent for a poll cycle.
-  if (S.sid && !live.some((s) => s.id === S.sid)) {
-    live.unshift({ id: S.sid, name: null, title: S.title, model: S.model, clients: 1, created_at: new Date().toISOString() });
+  const daemon = S.sessions;
+  const daemonIds = new Set(daemon.map((s) => s.id));
+  let live = daemon.filter((s) => s.clients > 0 && s.id !== S.sid);
+  // The attached session is always live, even before the daemon's session_list
+  // catches up (just-resumed / just-created) — synthesize it so it never
+  // flickers into Recent for a poll cycle.
+  if (S.sid) {
+    const cur = daemon.find((s) => s.id === S.sid);
+    live.unshift(cur ? { ...cur } : { id: S.sid, name: null, title: S.title, model: S.model, clients: 1, created_at: new Date().toISOString() });
   }
-  const liveIds = new Set(live.map((s) => s.id));
-  const past = S.past
-    .filter((s) => !liveIds.has(s.id))
-    .sort((a, b) => ((a.updated_at || a.created_at) < (b.updated_at || b.created_at) ? 1 : -1));
-  return { live, past };
+  live.sort((a, b) => (a.id === S.sid ? -1 : b.id === S.sid ? 1 : a.created_at < b.created_at ? 1 : -1));
+  const detached = daemon.filter((s) => s.clients === 0 && s.id !== S.sid).map((s) => ({ ...s, parked: true }));
+  const disk = S.past.filter((s) => !daemonIds.has(s.id) && s.id !== S.sid);
+  const recent = [...detached, ...disk].sort((a, b) => ((a.updated_at || a.created_at) < (b.updated_at || b.created_at) ? 1 : -1));
+  return { live, recent };
 }
-function fillRow(li, s, past) {
+function fillRow(li, s, isRecent) {
   const title = s.name || (s.id === S.sid && S.title) || s.title || s.id;
   if (li.firstChild.textContent !== title) li.firstChild.textContent = title;
   const dot = li.querySelector(".s-dot");
-  dot.classList.toggle("live", !past && s.clients > 0);
-  dot.classList.toggle("rest", past);
+  dot.classList.toggle("live", !isRecent && s.clients > 0);
+  dot.classList.toggle("rest", isRecent);
   const model = (s.model || "").replace(/^.*\//, "");
   const when = ago(s.updated_at || s.created_at);
-  const meta = past ? `${model} · ${s.message_count || 0} msg · ${when}` : `${model} · ${s.clients} · ${when}`;
+  const meta = !isRecent ? `${model} · ${s.clients} · ${when}`
+    : s.parked ? `${model} · idle · ${when}`
+    : `${model} · ${s.message_count || 0} msg · ${when}`;
   const txt = li.querySelector(".s-txt");
   if (txt.textContent !== meta) txt.textContent = meta;
 }
@@ -814,8 +821,9 @@ function reconcileList(ul, list, past) {
       li.innerHTML = '<div class="s-title"></div><div class="s-meta"><span class="s-dot"></span><span class="s-txt"></span></div>';
       li.onclick = () => {
         if (s.id === S.sid) return;
-        if (past) switchTo(s.id, "mirror", { continue: s.id });
-        else switchTo(s.id, "mirror");
+        // In the daemon (live or detached-in-memory) → attach; disk-only → resume.
+        if (S.sessions.some((x) => x.id === s.id)) switchTo(s.id, "mirror");
+        else switchTo(s.id, "mirror", { continue: s.id });
         if (innerWidth < 860) $("app").classList.remove("rail-open");
       };
       if (ul._ready) anim(li, [{ opacity: 0, transform: "translateX(-10px)" }, { opacity: 1, transform: "none" }], { duration: 260 });
@@ -832,12 +840,12 @@ function reconcileList(ul, list, past) {
   else ind.style.opacity = "0";
 }
 function renderSessions() {
-  const { live, past } = railItems();
+  const { live, recent } = railItems();
   reconcileList($("sessions"), live, false);
   $("live-empty").classList.toggle("hidden", live.length > 0);
   const pastWrap = $("past-wrap");
-  pastWrap.classList.toggle("hidden", past.length === 0);
-  if (past.length) reconcileList($("past-sessions"), past, true);
+  pastWrap.classList.toggle("hidden", recent.length === 0);
+  if (recent.length) reconcileList($("past-sessions"), recent, true);
 }
 function toast(msg, cls = "", ms = 3600) {
   const t = h("div", `toast ${cls}`, msg);

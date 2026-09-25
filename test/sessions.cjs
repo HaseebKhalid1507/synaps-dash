@@ -46,9 +46,10 @@ const expect = (name, got, want) => { if (JSON.stringify(got) !== JSON.stringify
   if (!target) { fail.push("no recent session with history to resume"); throw new Error("no target"); }
   R.target = { id: target.id, title: target.title.slice(0, 40), msgs: target.message_count };
 
-  // its row shows title + a "msg" meta (not a client count)
+  // its row shows title + a Recent meta ("N msg" for disk-only, "idle" for a
+  // detached session the daemon still holds) — never a client count.
   R.row = await p.evaluate((id) => { const li = document.querySelector(`#past-sessions > li[data-id="${id}"]`); return { title: li.querySelector(".s-title").textContent, meta: li.querySelector(".s-txt").textContent, restDot: li.querySelector(".s-dot").classList.contains("rest") }; }, target.id);
-  if (!/\bmsg\b/.test(R.row.meta)) fail.push(`recent row meta missing 'msg': ${R.row.meta}`);
+  if (!/\b(msg|idle)\b/.test(R.row.meta)) fail.push(`recent row meta unexpected: ${R.row.meta}`);
 
   // resume it
   await p.click(`#past-sessions > li[data-id="${target.id}"]`);
@@ -65,6 +66,31 @@ const expect = (name, got, want) => { if (JSON.stringify(got) !== JSON.stringify
   if (R.afterResume.threadHasText < 1) fail.push("resumed thread is empty (history didn't replay)");
   expect("resumed session moved into Live", R.afterResume.nowLive, true);
   expect("resumed session left Recent", R.afterResume.stillRecent, false);
+
+  // ── deterministic sectioning: a 0-client session (detached but still in the
+  // daemon, e.g. journal-less "live") belongs in Recent, not Live. Inject
+  // synthetic daemon state and re-render — no dependency on real park timing.
+  R.section = await p.evaluate(() => {
+    const now = new Date().toISOString();
+    const keepPast = S.past, keepSess = S.sessions;
+    S.past = [];
+    S.sessions = [
+      { id: S.sid, name: null, title: "current", model: "anthropic/x", clients: 1, lifecycle: "live", created_at: now },
+      { id: "ZZ-attached", name: null, title: "other attached", model: "anthropic/x", clients: 2, lifecycle: "live", created_at: now },
+      { id: "ZZ-detached-live", name: null, title: "detached, no journal", model: "anthropic/x", clients: 0, lifecycle: "live", created_at: now },
+      { id: "ZZ-parked", name: null, title: "parked", model: "anthropic/x", clients: 0, lifecycle: "parked", created_at: now },
+    ];
+    renderSessions();
+    const ids = (sel) => [...document.querySelectorAll(sel + " > li[data-id]")].map((li) => li.dataset.id);
+    const r = { live: ids("#sessions"), recent: ids("#past-sessions"), recentHidden: document.getElementById("past-wrap").classList.contains("hidden") };
+    S.past = keepPast; S.sessions = keepSess; renderSessions(); // restore
+    return r;
+  });
+  expect("attached (clients>0) session in Live", R.section.live.includes("ZZ-attached"), true);
+  expect("detached live (0 clients) session in Recent", R.section.recent.includes("ZZ-detached-live"), true);
+  expect("parked session in Recent", R.section.recent.includes("ZZ-parked"), true);
+  expect("0-client session NOT in Live", R.section.live.includes("ZZ-detached-live") || R.section.live.includes("ZZ-parked"), false);
+  expect("current session stays in Live", R.section.live.includes(R.afterResume.sid), true);
 
   await p.screenshot({ path: "/tmp/sd-sessions.png" });
   R.errs = errs;
