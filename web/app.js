@@ -27,6 +27,7 @@ const P = {
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
   brain: '<path d="M9 4a3 3 0 0 0-3 3v.5A3 3 0 0 0 4 10.5 3 3 0 0 0 5 16a3 3 0 0 0 4 3h.5V4z"/><path d="M15 4a3 3 0 0 1 3 3v.5a3 3 0 0 1 2 3 3 3 0 0 1-1 5.5 3 3 0 0 1-4 3h-.5V4z"/>',
   cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+  layers: '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
 };
 const svg = (name, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24">${P[name] || P.wrench}</svg>`;
 function toolIcon(name = "") {
@@ -48,8 +49,9 @@ const S = {
   sid: null, me: null, owner: null, clients: new Map(),
   streaming: false, replaying: false,
   wantSid: null, wantMode: "mirror", wantCreate: false, intentionalClose: false, retry: 0,
-  cur: null, localSubmit: null, localSteers: [],
+  cur: null, localSubmit: null, steers: [], // steer bubbles + their delivery state
   qid: 1, queries: new Map(), prompt: null, model: "",
+  turnTools: new Map(), // tool_id → card, across split segments of the current turn
   atBottom: true,
 };
 const T = $("thread");
@@ -179,36 +181,142 @@ function who(cid) {
 const clock = (d = new Date()) => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 function addUser(text, src, extra = "") {
+  splitAsst();
   const m = h("div", `msg user ${extra}`);
   m.append(h("div", "bubble", text), h("div", "meta", `${src ? src + " · " : ""}${clock()}`));
   return add(m);
 }
-function addSys(text, cls = "") { return add(h("div", `sys ${cls}`, text)); }
+function addSys(text, cls = "") { splitAsst(); return add(h("div", `sys ${cls}`, text)); }
 
-function newAsst() {
-  const root = h("div", "msg asst live");
+// ── steering: a bubble per steer, with live delivery status ───────────────────
+// steered{delivered} → queued/waiting; stream.agent.steering_delivered{message}
+// → delivered; turn_started{queued_auto,user_text} → follow-up; dequeued (cancel)
+// → returned to input; still unacknowledged at idle → lost.
+const STEER = {
+  sending: ["⋯", "sending"],
+  queued: ["◷", "queued — lands at the next step"],
+  waiting: ["◷", "queued — sends after this turn"],
+  delivered: ["✓", "delivered"],
+  followup: ["↻", "sent as follow-up"],
+  returned: ["↩", "not delivered — back in your input"],
+  lost: ["✗", "not delivered"],
+};
+const STEER_OPEN = ["sending", "queued", "waiting"];
+function setSteer(st, state) {
+  st.state = state;
+  st.m.dataset.steer = state;
+  const [ico, label] = STEER[state];
+  st.st.innerHTML = "";
+  st.st.append(h("span", "ico", ico), h("span", null, label));
+}
+function addSteer(text, by, local, state) {
+  splitAsst();
+  const m = h("div", "msg user steer");
+  const meta = h("div", "meta");
+  const st = h("span", "steer-st");
+  meta.append(`steer · ${by} · ${clock()} · `, st);
+  m.append(h("div", "bubble", text), meta);
+  add(m);
+  const rec = { text, m, st, local, state: "" };
+  S.steers.push(rec);
+  setSteer(rec, state);
+  return rec;
+}
+const findSteer = (text, states = STEER_OPEN) => S.steers.find((x) => x.text === text && states.includes(x.state));
+
+function newAsst(cont = false) {
+  const root = h("div", `msg asst live${cont ? " cont" : ""}`);
   root.innerHTML = '<div class="avatar">S</div>';
   const body = h("div", "body");
   root.append(body);
   add(root);
-  S.cur = { root, body, think: null, thinkRaw: "", thinkStart: 0, text: null, textRaw: "", tools: new Map(), last: null };
+  S.cur = { root, body, think: null, thinkRaw: "", thinkStart: 0, text: null, textRaw: "", tools: new Map(), last: null, group: null };
   return S.cur;
 }
-const asst = () => S.cur ?? newAsst();
+const asst = () => S.cur ?? newAsst(S.split);
+
+// ── activity groups ───────────────────────────────────────────────────────────
+// Consecutive thinking blocks and tool calls batch into ONE collapsible row
+// ("Thought for 6s · ran 3 commands · read 2 files"); assistant text breaks the
+// batch. A batch of one renders flat (no group chrome).
+const CAT = {
+  terminal: ["command", "commands", "Running"], file: ["read", "reads", "Reading"], pencil: ["edit", "edits", "Editing"],
+  search: ["search", "searches", "Searching"], globe: ["fetch", "fetches", "Fetching"], sparkles: ["subagent", "subagents", "Delegating"],
+  mail: ["email", "emails", "Emailing"], box: ["lookup", "lookups", "Looking up"], wrench: ["tool call", "tool calls", "Calling"],
+};
+function groupFor(c) {
+  if (c.group && (c.last === "think" || c.last === "tool")) return c.group;
+  const el = h("details", "activity single");
+  el.innerHTML = `<summary class="act-head"><span class="act-ico">${svg("layers")}</span><span class="act-lbl"></span><span class="act-st"></span>${svg("chev", "i chev")}</summary><div class="act-body"></div>`;
+  add(el, c.body);
+  c.group = { el, body: el.querySelector(".act-body"), lbl: el.querySelector(".act-lbl"), st: el.querySelector(".act-st"), items: [] };
+  return c.group;
+}
+function closeGroup(c) { if (c?.group) { updateGroup(c.group); c.group = null; } }
+function updateGroup(g) {
+  if (!g) return;
+  const items = g.items;
+  if (items.length < 2) { g.el.classList.add("single"); g.el.open = true; return; }
+  // becoming a real batch: collapse once (never override a later user toggle)
+  if (g.el.classList.contains("single")) { g.el.classList.remove("single"); g.el.open = false; }
+  const running = items.find((it) => (it.kind === "think" ? it.el.classList.contains("active") : !it.t.done));
+  const counts = new Map();
+  let thinkSecs = 0, thinks = 0, errs = 0;
+  for (const it of items) {
+    if (it.kind === "think") { thinks++; thinkSecs += it.secs || 0; continue; }
+    const k = toolIcon(it.t.name);
+    counts.set(k, (counts.get(k) || 0) + 1);
+    if (it.t.card.classList.contains("err")) errs++;
+  }
+  const parts = [];
+  if (thinks) parts.push(thinkSecs ? `Thought for ${thinkSecs}s` : thinks > 1 ? `Thought ${thinks}×` : "Thought");
+  for (const [k, n] of counts) { const [one, many] = CAT[k] || CAT.wrench; parts.push(`${n} ${n === 1 ? one : many}`); }
+  if (running && !S.replaying) {
+    const cur = running.kind === "think" ? "Thinking…" : `${(CAT[toolIcon(running.t.name)] || CAT.wrench)[2]} ${running.t.sum.textContent || running.t.name}`;
+    g.lbl.innerHTML = "";
+    g.lbl.append(h("span", "act-now", cur), h("span", "act-meta", ` · ${items.length} steps`));
+    g.st.innerHTML = '<span class="spinner"></span>';
+    g.el.classList.add("live");
+  } else {
+    g.lbl.textContent = parts.join(" · ");
+    g.st.innerHTML = errs ? `${svg("x")}<span>${errs} failed</span>` : svg("check");
+    g.el.classList.toggle("has-err", errs > 0);
+    g.el.classList.remove("live");
+  }
+}
 
 function closeThinking(c) {
   if (!c || !c.think || !c.think.classList.contains("active")) return;
   c.think.classList.remove("active");
   const secs = c.thinkStart ? Math.max(1, Math.round((performance.now() - c.thinkStart) / 1000)) : 0;
-  c.think.querySelector(".lbl").textContent = secs ? `Thought for ${secs}s` : "Thoughts";
+  c.think.querySelector(".lbl").textContent = secs && !S.replaying ? `Thought for ${secs}s` : "Thoughts";
+  if (c.think._item) { c.think._item.secs = S.replaying ? 0 : secs; updateGroup(c.think._group); }
 }
 function dropCaret(c) { c?.body.querySelectorAll(".caret").forEach((x) => x.remove()); }
+// A mid-turn insert (steer bubble, notice) must not sink below later output:
+// end the current assistant segment so the stream continues in a NEW segment
+// below it. In-flight tools stay alive (resolved via S.turnTools).
+function splitAsst() {
+  const c = S.cur;
+  if (!c || !S.streaming || S.replaying) return;
+  closeThinking(c);
+  dropCaret(c);
+  if (c.text) { c.text._live = false; markDirty(c.text); }
+  closeGroup(c);
+  c.root.classList.remove("live");
+  if (!c.body.children.length) c.root.remove();
+  S.cur = null;
+  S.split = true;
+}
 function finishAsst() {
   const c = S.cur;
+  for (const t of S.turnTools.values()) if (!t.done) toolDone(t, "err", "stopped");
+  S.turnTools.clear();
+  S.split = false;
   if (!c) return;
   closeThinking(c);
   dropCaret(c);
-  for (const t of c.tools.values()) if (!t.done) toolDone(t, "err", "stopped");
+  closeGroup(c);
   c.root.classList.remove("live");
   if (!c.body.children.length) c.root.remove();
   S.cur = null;
@@ -220,7 +328,13 @@ function appendThinking(text) {
     const d = h("details", "think active");
     d.innerHTML = `<summary>${svg("brain")}<span class="lbl">Thinking…</span>${svg("chev", "i chev")}</summary><div class="think-body"></div>`;
     c.think = d; c.thinkRaw = ""; c.thinkStart = performance.now();
-    add(d, c.body);
+    const g = groupFor(c);
+    add(d, g.body);
+    d._item = { kind: "think", el: d, secs: 0 };
+    d._group = g;
+    g.items.push(d._item);
+    c.last = "think";
+    updateGroup(g);
   }
   c.thinkRaw += text;
   c.think.querySelector(".think-body").textContent = c.thinkRaw;
@@ -244,6 +358,7 @@ function appendText(text) {
   const c = asst();
   closeThinking(c);
   if (!c.text || c.last !== "text") {
+    closeGroup(c);
     if (c.text) { c.text._live = false; markDirty(c.text); }
     c.text = add(h("div", "md"), c.body);
     c.textRaw = "";
@@ -270,18 +385,24 @@ function toolCard(id, name, input) {
   card.innerHTML = `<button class="tool-head"><span class="tool-ico">${svg(toolIcon(name))}</span><span class="tool-name"></span><span class="tool-sum"></span><span class="tool-st"><span class="spinner"></span></span>${svg("chev", "i chev")}</button><div class="tool-body"><div class="tool-sec in"><div class="lbl">Input</div><pre></pre></div><div class="tool-sec out ${/bash|shell|exec/.test(name) ? "term" : ""} hidden"><div class="lbl">Output</div><pre></pre></div></div>`;
   card.querySelector(".tool-name").textContent = name || "tool";
   card.querySelector(".tool-head").onclick = () => card.classList.toggle("open");
-  add(card, c.body);
+  const g = groupFor(c);
+  add(card, g.body);
   const t = { card, name, start: performance.now(), inRaw: "", outRaw: "", done: false,
     sum: card.querySelector(".tool-sum"), st: card.querySelector(".tool-st"),
     inp: card.querySelector(".in pre"), out: card.querySelector(".out pre"), outSec: card.querySelector(".out") };
   c.tools.set(id, t);
+  S.turnTools.set(id, t);
   c.last = "tool";
+  t.group = g;
+  g.items.push({ kind: "tool", t });
   if (input !== undefined) setToolInput(t, input);
+  updateGroup(g);
   return t;
 }
 function setToolInput(t, input) {
   t.sum.textContent = summarize(input);
   t.inp.textContent = typeof input === "string" ? input : JSON.stringify(input, null, 2);
+  updateGroup(t.group);
 }
 function setToolOutput(t, text) {
   t.outRaw = text;
@@ -296,6 +417,7 @@ function toolDone(t, cls = "ok", label) {
   const ms = performance.now() - t.start;
   const dur = ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
   t.st.innerHTML = `${svg(cls === "ok" ? "check" : "x")}<span>${label || (S.replaying ? "" : dur)}</span>`;
+  updateGroup(t.group);
 }
 
 function renderTail(tail, cutAfterLastUser = false) {
@@ -312,7 +434,7 @@ function renderTail(tail, cutAfterLastUser = false) {
   for (const it of items) {
     switch (it.kind) {
       case "user": finishAsst(); addUser(it.text); break;
-      case "thinking": appendThinking(it.text); closeThinking(S.cur); if (S.cur?.think) S.cur.think.querySelector(".lbl").textContent = "Thoughts"; break;
+      case "thinking": appendThinking(it.text); closeThinking(S.cur); break;
       case "text": appendText(it.text); break;
       case "tool_use": { const t = toolCard(it.tool_id, it.tool_name, it.input); toolDone(t, "ok", ""); break; }
     }
@@ -503,7 +625,10 @@ function onEvent(e) {
             follow();
           });
         }
-      } else if (trig === "queued_auto" && e.user_text) addUser(e.user_text, "queued");
+      } else if (trig === "queued_auto" && e.user_text) {
+        const st = findSteer(e.user_text);
+        if (st) setSteer(st, "followup"); else addUser(e.user_text, "queued");
+      }
       else addSys(`turn started · ${trig}`);
       finishAsst();
       newAsst();
@@ -511,16 +636,32 @@ function onEvent(e) {
       return;
     }
     case "conversation": return updateCost(e.digest);
-    case "idle": S.streaming = false; finishAsst(); renderComposer(); return;
+    case "idle":
+      S.streaming = false;
+      for (const st of S.steers) if (st.state === "sending") setSteer(st, "lost");
+      S.steers = S.steers.filter((st) => STEER_OPEN.includes(st.state));
+      finishAsst(); renderComposer(); return;
     case "prompt": return showPrompt(e.request);
     case "prompt_resolved": if (S.prompt?.id === e.prompt_id) hidePrompt(); return;
-    case "system_notice": return addSys(e.text);
+    case "system_notice":
+      // The daemon broadcasts its CLI attach hint ("input is owned by client #N …
+      // attach with --takeover") to EVERY client whenever anyone mirror-attaches.
+      // The web shows ownership in the watch bar; the hint is noise here.
+      if (/^input is owned by client #\d+/.test(e.text)) return;
+      return addSys(e.text);
     case "steered": {
-      const i = S.localSteers.indexOf(e.text);
-      if (i >= 0) S.localSteers.splice(i, 1); else addUser(e.text, "steer · peer");
+      const st = findSteer(e.text, ["sending"]) || addSteer(e.text, S.owner != null && S.owner !== S.me ? who(S.owner) : "peer", false, "sending");
+      setSteer(st, e.delivered ? "queued" : "waiting");
       return;
     }
-    case "dequeued": return addSys(`dequeued: ${e.text}`);
+    case "dequeued": {
+      const st = findSteer(e.text);
+      if (!st) { toast(`Not delivered: ${e.text.slice(0, 80)}`); return; }
+      setSteer(st, "returned");
+      const input = $("input");
+      if (st.local && isOwner() && !input.value.trim()) { input.value = e.text; autosize(); renderComposer(); }
+      return;
+    }
     case "client_joined":
       S.clients.set(e.client, e.kind);
       if (e.client !== S.me && !S.replaying) toast(`${who(e.client)} joined`);
@@ -560,17 +701,18 @@ function onStream(s) {
       case "thinking": return appendThinking(s.text);
       case "text": return appendText(s.text);
       case "tool_use_start": toolCard(s.tool_id, s.tool_name); return;
-      case "tool_use_delta": { const t = asst().tools.get(s.tool_id); if (t) { t.inRaw += s.delta; t.sum.textContent = t.inRaw.slice(0, 200); } return; }
-      case "tool_use": { const t = asst().tools.get(s.tool_id) ?? toolCard(s.tool_id, s.tool_name); setToolInput(t, s.input); return; }
-      case "tool_result_delta": { const t = S.cur?.tools.get(s.tool_id); if (t) setToolOutput(t, t.outRaw + s.delta); return; }
-      case "tool_result": { const t = S.cur?.tools.get(s.tool_id); if (t) { setToolOutput(t, s.result); toolDone(t, /^(error|Error:|✗)/.test(s.result || "") ? "err" : "ok"); } if (S.cur) S.cur.last = "tool"; return; }
+      case "tool_use_delta": { const t = S.turnTools.get(s.tool_id); if (t) { t.inRaw += s.delta; t.sum.textContent = t.inRaw.slice(0, 200); updateGroup(t.group); } return; }
+      case "tool_use": { const t = S.turnTools.get(s.tool_id) ?? toolCard(s.tool_id, s.tool_name); setToolInput(t, s.input); return; }
+      case "tool_result_delta": { const t = S.turnTools.get(s.tool_id); if (t) setToolOutput(t, t.outRaw + s.delta); return; }
+      case "tool_result": { const t = S.turnTools.get(s.tool_id); if (t) { setToolOutput(t, s.result); toolDone(t, /^(error|Error:|✗)/.test(s.result || "") ? "err" : "ok"); } if (S.cur) S.cur.last = "tool"; return; }
     }
   } else if (s.kind === "session") {
     if (s.session === "usage" && s.model) $("st-model").textContent = s.model.replace(/^.*\//, "");
     else if (s.session === "error") addSys(`error: ${s.message}`, "err");
     else if (s.session === "notice") addSys(s.text);
   } else if (s.kind === "agent") {
-    if (s.agent === "subagent_start") addSys(`⇢ ${s.agent_name}: ${s.task_preview}`);
+    if (s.agent === "steering_delivered") { const st = findSteer(s.message); if (st) setSteer(st, "delivered"); }
+    else if (s.agent === "subagent_start") addSys(`⇢ ${s.agent_name}: ${s.task_preview}`);
     else if (s.agent === "subagent_done") addSys(`⇠ ${s.agent_name} done · ${s.duration_secs.toFixed(1)}s`);
   }
 }
@@ -599,7 +741,7 @@ function doSend() {
   if (!S.sid || !isOwner()) return;
   if (!text) { if (S.streaming) cmd({ cmd: "cancel" }); return; }
   T.querySelector(".empty")?.remove();
-  if (S.streaming) { S.localSteers.push(text); addUser(text, "steer · you"); cmd({ cmd: "steer", text }); }
+  if (S.streaming) { addSteer(text, "you", true, "sending"); cmd({ cmd: "steer", text }); }
   else { finishAsst(); addUser(text, "you"); S.localSubmit = text; cmd({ cmd: "submit", text, attachments: [] }); }
   S.atBottom = true; follow();
   input.value = ""; autosize(); renderComposer();
