@@ -375,6 +375,11 @@ kbd { font: 10.5px var(--mono); padding: 1px 5px; border-radius: 5px; border: 1p
   #app.rail-open #rail { transform: none; visibility: visible; box-shadow: 20px 0 60px -20px rgba(0,0,0,.7);
     transition: transform 520ms var(--ease), box-shadow 520ms var(--ease), visibility 0s; }
   #rail > *, #app.rail-collapsed #rail > * { width: auto; transform: none; opacity: 1; }
+  /* scrim: dims the chat behind the open drawer; tapping it closes the drawer
+     (app.js closeDrawer — a click on #app::after targets #app). */
+  #app::after { content: ""; position: fixed; inset: 0; z-index: 39; background: rgba(0,0,0,.45);
+    opacity: 0; visibility: hidden; transition: opacity 380ms var(--ease-move), visibility 0s linear 380ms; }
+  #app.rail-open::after { opacity: 1; visibility: visible; transition: opacity 520ms var(--ease), visibility 0s; }
   #thread { padding: 70px 14px 190px; }
   #dock { padding: 0 10px 12px; }
   .hints, #conn-text { display: none; }

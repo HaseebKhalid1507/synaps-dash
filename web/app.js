@@ -81,6 +81,9 @@ savePrefs();
 // One vocabulary (mirrors the CSS tokens). transform/opacity only, plus height
 // for expand/collapse. Everything is skipped under prefers-reduced-motion.
 const RM = matchMedia("(prefers-reduced-motion: reduce)");
+// Mobile layout: the rail is an overlay drawer. Same query as the CSS breakpoint
+// (innerWidth < 860 disagreed with `max-width: 860px` at exactly 860px).
+const NARROW = matchMedia("(max-width: 860px)");
 const motion = () => (PREFS.motion === "full" ? true : PREFS.motion === "reduced" ? false : !RM.matches);
 const EASE = { out: "cubic-bezier(.16,1,.3,1)", move: "cubic-bezier(.65,0,.35,1)", pop: "cubic-bezier(.34,1.45,.64,1)" };
 function anim(el, frames, opts = {}) {
@@ -1568,7 +1571,7 @@ function reconcileList(ul, list, past) {
         // In the daemon (live or detached-in-memory) → attach; disk-only → resume.
         if (S.sessions.some((x) => x.id === s.id)) switchTo(s.id, "mirror");
         else switchTo(s.id, "mirror", { continue: s.id });
-        if (innerWidth < 860) { $("app").classList.remove("rail-open"); $("rail-toggle").setAttribute("aria-expanded", "false"); }
+        closeDrawer();
       };
       if (ul._ready) anim(li, [{ opacity: 0, transform: "translateX(-10px)" }, { opacity: 1, transform: "none" }], { duration: 260 });
     }
@@ -1909,15 +1912,23 @@ $("input").addEventListener("input", () => { autosize(); renderComposer(); });
 $("input").addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing && (PREFS.sendKey !== "mod" || ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); doSend(); } });
 $("send").onclick = doSend;
 $("takeover").onclick = () => { if (S.sid) switchTo(S.sid, "takeover"); };
-$("new-session").onclick = () => switchTo(null, "mirror", true);
+$("new-session").onclick = () => { closeDrawer(); switchTo(null, "mirror", true); };
 // Rail drawer. CSS moves the panel (asymmetric curves, see style.css #app);
 // on open, EVERY session row that's on screen cascades in after it with a hint
 // of overshoot. No count cap (tall screens show 30+ rows): instead the whole
 // wave fits a fixed window — the per-row beat shrinks as the row count grows.
 const CASCADE_WINDOW_MS = 420, CASCADE_STEP_MS = 28;
-function railShown() { const a = $("app").classList; return innerWidth < 860 ? a.contains("rail-open") : !a.contains("rail-collapsed"); }
+function railShown() { const a = $("app").classList; return NARROW.matches ? a.contains("rail-open") : !a.contains("rail-collapsed"); }
+// Mobile drawer covers the toggle, so it needs its own ways out: tap the scrim,
+// Escape, or pick anything that navigates. No-op on desktop / when closed.
+function closeDrawer() {
+  if (!NARROW.matches || !$("app").classList.contains("rail-open")) return false;
+  $("app").classList.remove("rail-open");
+  $("rail-toggle").setAttribute("aria-expanded", "false");
+  return true;
+}
 function toggleRail() {
-  $("app").classList.toggle(innerWidth < 860 ? "rail-open" : "rail-collapsed");
+  $("app").classList.toggle(NARROW.matches ? "rail-open" : "rail-collapsed");
   const shown = railShown();
   $("rail-toggle").setAttribute("aria-expanded", String(shown));
   if (!shown || !motion()) return;
@@ -1930,9 +1941,11 @@ function toggleRail() {
 }
 $("rail-toggle").setAttribute("aria-expanded", String(railShown()));
 $("rail-toggle").onclick = toggleRail;
+$("app").onclick = (ev) => { if (ev.target === $("app")) closeDrawer(); }; // the scrim is #app::after
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") {
     if (S.prompt) { answer(S.prompt.kind === "secret" ? null : "n"); return; }
+    if (closeDrawer()) return; // never cancel a turn just to dismiss the drawer
     if (S.streaming && isOwner()) cmd({ cmd: "cancel" });
   } else if (ev.key === "/" && document.activeElement !== $("input") && isOwner()) { ev.preventDefault(); $("input").focus(); }
 });
