@@ -12,7 +12,7 @@ daemon ──spawns──▶ synaps-dash (this extension) ◀── HTTP/WS 127.
    └──── daemon.sock ◀───┘  one UDS connection per tab, as a normal client (kind "server")
 ```
 
-About 3.7k lines (`web/app.js`, `main.ts`, `web/style.css`, `web/index.html`), with no
+About 5k lines (`web/app.js`, `main.ts`, `web/style.css`, `web/index.html`), with no
 dependencies: the server uses only Bun built-ins, and the client is plain JS with no
 framework and no build step.
 
@@ -36,6 +36,15 @@ framework and no build step.
   request reports. The tick marks Synaps's compaction point. Click it for details: left in the
   window, what's reserved per request (max output, thinking, next tool result, margin), and room
   before compaction by the daemon's own estimate.
+- **Subagents, live.** Like the TUI's subagent HUD: a tray above the composer with one row
+  per agent (name or role, `sa_N`, what it's doing right now (`$ cargo test`, `reading
+  app.rs`, `thinking…`), tool count and a running clock). The header pill reads
+  `⠋ 2 agents (1 done)`. Click a row for the task, every step it took (with times, and
+  steers) and its result, plus a jump to its card in the transcript. Background agents
+  (`subagent_start`) keep ticking after the turn that started them ends: the tray polls the
+  daemon's registry while idle, and their completion adds a `⇠ reviewer (sa_3) finished · 2:14`
+  line to the transcript. A finished agent leaves the tray after 8s (the TUI: 5s), and its
+  card keeps the record.
 - **Ambient glow that works with the agent.** The album-coloured background glow drifts
   while a turn is running and settles back when it's idle. The speed ramps up and down
   smoothly (slow start, fastest in the middle, eased finish). Only transform and opacity
@@ -56,7 +65,14 @@ framework and no build step.
   - **ls** / **find:** listings.
   - **bash:** a terminal view with ANSI colour for tools that keep it, `exit N` / `timed out`
     status, and head + tail for long output.
-  - **subagent:** a task card with markdown for the task and the result.
+  - **subagent** / **subagent_start** / **subagent_resume:** a task card with markdown for the
+    task. The card follows its agent: live status and steps, and for background agents the
+    card's ✓ is the agent's (not the start call's), with the result once collected.
+  - **subagent_status** / **subagent_collect:** a status card (state, elapsed, tools, model)
+    with the partial output or the result as markdown. Authorization digests are tucked into
+    a collapsed "details".
+  - **subagent_steer:** the message, and whether the agent got it. **subagent_models:** chips,
+    with the foreground model marked.
   - **fetch:** a link card.
   - **JSON results:** a collapsible tree.
 
@@ -193,6 +209,7 @@ config's hash is unchanged.
 | `test/sessions.cjs` | Live/Recent split by client count, no bodies in `/api/sessions`, resume keeps the id and history |
 | `test/run-state.cjs` | header pill states, TUI spinner frames + cadence, pulse, layout, reconnect, reduced motion |
 | `test/glow.cjs` | glow speed ramps slow → fast → slow both ways, never snaps, settles and stops at idle, static under reduced motion |
+| `test/subagents.cjs` | subagent tray, header count, card linking (incl. unicode task previews), status/collect/steer/models views, registry rows in both status shapes, external completion, flash expiry, layout; then a real blocking + background subagent, incl. idle polling (`SKIP_LIVE=1` skips it) |
 | `test/tool-views.cjs` | every tool view against real-shaped events, failure detection, folding / truncation / streamed deltas, fallbacks, HTML escaping; then a real turn with real tools |
 | `test/rail.cjs` | rail drawer: exact curves by pausing and seeking the running transitions (close in-out, open expo-out, desktop + mobile), solid panel at every step, no re-wrap, cascade, aria-expanded, mobile layout, reduced motion |
 | `test/context.cjs` | context meter: estimate on attach, measured == the wire's `Usage` after a real turn, budget/flag == a direct assessment, thresholds, formatting, compaction → estimate, popover, layout; plus Enter mid-switch keeps the message |
@@ -238,13 +255,26 @@ config's hash is unchanged.
   is conservative: it counts every tool schema even with progressive disclosure, so it reads
   well above the measured `Usage`.
 
+- **Subagent events** (0.10) ride the stream of the turn that started the agent:
+  `stream.agent.subagent_start {subagent_id, agent_name, task_preview}` (the task's first 80
+  chars), `subagent_update {status}` (`💭 thinking...`, `⚙ bash (tool #2)`, then the detail:
+  `$ cmd`, `reading f`, `grep /x/`), `subagent_done {result_preview, duration_secs}`. A
+  background agent outlives that turn and goes quiet. The `subagent_rows` event (the
+  registry) only comes at 1 Hz while a turn streams, so an idle client asks with the
+  `subagent_rows` query, whose status is Rust `Debug` text (`Running`, `Failed("…")`) where
+  the event has serde (`running`, `{"failed": "…"}`). The end always arrives as an
+  `external` event, `content_type: "subagent_completion"`, with `data {subagent_id, status,
+  duration_secs}` and the preview after `Preview: ` in its text. Inline agents are all
+  named `inline`; `role` is a fixed enum (planner, implementer, tester, reviewer, researcher,
+  debugger).
+
 ## Roadmap
 
 Toward an agentic development environment. First, things the protocol already sends that
 the client doesn't use yet:
 
-- **Subagents panel.** Subagent start/update/done events, live parallel agents, steer them
-  (plus `N agents` in the run-state pill, like the TUI).
+- **Subagents, next.** Steer or cancel an agent from its row (the protocol has no client
+  command for it yet; today only the model can, through `subagent_steer`).
 - **Command palette + slash commands** (`⌘K`) over `engine_command` / `plugin_command`.
 - **Context meter + compact.** `ContextReport` / `ContextAssessment` queries; handle
   `CompactionCancelled`.

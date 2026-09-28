@@ -143,6 +143,8 @@ window.__glow = Glow; // test hook
 
 // ── run state (header) — mirrors the TUI header's status span ─────────────────
 //   not connected → ⠋ connecting…   compacting → ⠋ compacting…
+//   subagents     → ⠋ 2 agents (1 done), ✔ once none is running (the TUI puts
+//                   them ahead of streaming, and so do we)
 //   streaming     → ● streaming (pulsing)   idle → ○ ready
 // Same glyphs as the TUI (SPINNER_FRAMES), same cadence (a frame every 3 ticks
 // × 16ms = 48ms). render() is idempotent: it only touches the DOM on a change.
@@ -166,23 +168,30 @@ const RunState = (() => {
     if (S.ws?.readyState !== WebSocket.OPEN) return "connecting";
     if (!S.sid) return null; // connected, no session → nothing to report
     if (S.compacting) return "compacting";
+    if (Agents.counts().shown) return "agents";
     return S.streaming ? "streaming" : "ready";
   }
+  function agentsView() {
+    const { active, done } = Agents.counts();
+    return { glyph: active ? null : "✔", text: `${active} agent${active === 1 ? "" : "s"} (${done} done)`, cls: "busy" };
+  }
+  let key = null;
   function render() {
     const next = current();
-    if (next === state) return;
+    const v = next === "agents" ? agentsView() : VIEW[next];
+    const k = next && `${next}|${v.text}`;
+    if (k === key) return;
     const prev = state;
-    state = next;
+    key = k; state = next;
     el.classList.toggle("hidden", !next);
     if (!next) { spinner(false); return; }
-    const v = VIEW[next];
     el.classList.remove("busy", "streaming", "ready");
     el.classList.add(v.cls);
     el.dataset.state = next;
     text.textContent = v.text;
     spinner(v.glyph === null);
     if (v.glyph !== null) glyph.textContent = v.glyph;
-    if (prev) anim(el, [{ opacity: 0.35, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 240 });
+    if (prev && prev !== next) anim(el, [{ opacity: 0.35, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 240 });
   }
   return { render, get state() { return state; } };
 })();
@@ -635,7 +644,17 @@ const CAT = {
   terminal: ["command", "commands", "Running"], file: ["read", "reads", "Reading"], pencil: ["edit", "edits", "Editing"],
   search: ["search", "searches", "Searching"], globe: ["fetch", "fetches", "Fetching"], sparkles: ["subagent", "subagents", "Delegating"],
   mail: ["email", "emails", "Emailing"], box: ["lookup", "lookups", "Looking up"], wrench: ["tool call", "tool calls", "Calling"],
+  agentcheck: ["agent check", "agent checks", "Checking on"], agentsteer: ["agent steer", "agent steers", "Steering"],
 };
+// Batch category: the icon's, except the subagent family, where only a start /
+// oneshot / resume is "a subagent" (status + steer are not "2 subagents").
+function toolCat(name) {
+  const k = toolKind(name);
+  if (k === "subagent_check") return "agentcheck";
+  if (k === "subagent_steer") return "agentsteer";
+  if (k === "subagent_models") return "box";
+  return toolIcon(name);
+}
 function groupFor(c) {
   if (c.group && (c.last === "think" || c.last === "tool")) return c.group;
   const el = h("details", "activity single");
@@ -657,7 +676,7 @@ function updateGroup(g) {
   let thinkSecs = 0, thinks = 0, errs = 0;
   for (const it of items) {
     if (it.kind === "think") { thinks++; thinkSecs += it.secs || 0; continue; }
-    const k = toolIcon(it.t.name);
+    const k = toolCat(it.t.name);
     counts.set(k, (counts.get(k) || 0) + 1);
     if (it.t.card.classList.contains("err")) errs++;
   }
@@ -665,7 +684,10 @@ function updateGroup(g) {
   if (thinks) parts.push(thinkSecs ? `Thought for ${thinkSecs}s` : thinks > 1 ? `Thought ${thinks}×` : "Thought");
   for (const [k, n] of counts) { const [one, many] = CAT[k] || CAT.wrench; parts.push(`${n} ${n === 1 ? one : many}`); }
   if (running && !S.replaying) {
-    const cur = running.kind === "think" ? "Thinking…" : `${(CAT[toolIcon(running.t.name)] || CAT.wrench)[2]} ${running.t.sum.textContent || running.t.name}`;
+    const ag = running.kind === "tool" && running.t.agent;
+    const cur = running.kind === "think" ? "Thinking…"
+      : ag && ag.state === "running" && ag.step ? `${CAT.sparkles[2]} ${Agents.label(ag)} · ${ag.step}` // a oneshot subagent: its live step
+      : `${(CAT[toolCat(running.t.name)] || CAT.wrench)[2]} ${running.t.sum.textContent || running.t.name}`;
     const key = `${cur}|${items.length}`;
     if (g.lbl._key !== key) {
       const changedStep = (g.lbl._cur ?? cur) !== cur;
@@ -890,7 +912,10 @@ function toolKind(name) {
   if (n === "grep") return "grep";
   if (/^(find|glob)$/.test(n)) return "find";
   if (n === "ls") return "ls";
-  if (/^subagent(_start)?$/.test(n)) return "subagent";
+  if (/^subagent(_start|_resume)?$/.test(n)) return "subagent";
+  if (/^subagent_(status|collect)$/.test(n)) return "subagent_check";
+  if (n === "subagent_steer") return "subagent_steer";
+  if (n === "subagent_models") return "subagent_models";
   if (/fetch/.test(n)) return "fetch";
   return null;
 }
@@ -1220,6 +1245,11 @@ function jsonOut(text) {
   if (!/^[[{]/.test(s) || s.length > 400000) return null;
   try { const w = h("div", "jtree"); w.append(jsonTree(JSON.parse(s))); return w; } catch { return null; }
 }
+function jsonObj(text) {
+  const s = String(text ?? "").trim();
+  if (!s.startsWith("{")) return null;
+  try { const v = JSON.parse(s); return v && typeof v === "object" && !Array.isArray(v) ? v : null; } catch { return null; }
+}
 function chipRow(pairs) {
   const chips = h("div", "chips");
   for (const [k, val] of pairs) {
@@ -1298,15 +1328,22 @@ const TOOL_VIEWS = {
   ls: {
     output: (t, text, fail) => (fail ? null : lsView(text)),
   },
+  // subagent (blocking oneshot), subagent_start (background), subagent_resume.
+  // Linked to the live Agents record by the daemon's subagent_start event; the
+  // card then carries the agent's status, steps and (background) its result.
   subagent: {
-    summary: (v) => `${v.agent || v.role || "agent"}: ${String(v.task || "").split("\n")[0]}`,
+    summary: (v) => (typeof v.task === "string"
+      ? `${v.agent || v.role || "agent"}: ${v.task.split("\n")[0]}`
+      : `${v.handle_id ?? ""} ↻ ${String(v.instructions ?? "").split("\n")[0]}`),
     input(t, v) {
-      if (typeof v.task !== "string") return false;
-      const c = chipRow([["agent", v.agent], ["role", v.role], ["model", v.model], ["timeout", v.timeout ? `${v.timeout}s` : null], ["writes", v.write_policy?.mode]]);
+      const resume = typeof v.task !== "string";
+      if (resume && typeof v.instructions !== "string") return false;
+      const c = chipRow(resume ? [["resumes", v.handle_id]]
+        : [["agent", v.agent], ["role", v.role], ["model", v.model], ["timeout", v.timeout ? `${v.timeout}s` : null], ["writes", v.write_policy?.mode]]);
       if (c) { c.classList.add("first"); t.inp.append(c); }
       const task = h("div", "md tmd");
-      task.innerHTML = md(v.task);
-      t.inp.append(h("div", "kv-key", "task"), task);
+      task.innerHTML = md(resume ? v.instructions : v.task);
+      t.inp.append(h("div", "kv-key", resume ? "instructions" : "task"), task);
       if (typeof v.system_prompt === "string" && v.system_prompt) {
         const d = h("details", "tdet");
         d.append(h("summary", null, `system prompt · ${plural(v.system_prompt.split("\n").length, "line")}`), h("pre", "blk", v.system_prompt));
@@ -1314,10 +1351,59 @@ const TOOL_VIEWS = {
       }
     },
     output(t, text, fail) {
-      if (fail || !text.trim() || jsonOut(text)) return null;
+      if (fail || !text.trim()) return null;
+      const j = jsonObj(text);
+      if (j && typeof j.handle_id === "string") { Agents.started(t, j); return "hide"; } // start/resume ack → the agent section
+      if (j) return null;
+      // oneshot: "[subagent:<label>] <text>" / "[subagent:<label> ERROR] <text>"
+      const m = /^\[subagent:([^\]\n]*?)( ERROR)?\] ?/.exec(text);
       const d = h("div", "md tmd");
-      d.innerHTML = md(text);
-      return d;
+      d.innerHTML = md(m ? text.slice(m[0].length) : text);
+      if (!m?.[2]) return d;
+      const w = h("div");
+      w.append(h("div", "ag-bad", "subagent failed"), d);
+      return w;
+    },
+  },
+  // subagent_status / subagent_collect: the agent's status as a card, not JSON.
+  subagent_check: {
+    summary: (v) => Agents.labelFor(v.handle_id),
+    output(t, text, fail) {
+      const j = !fail && jsonObj(text);
+      if (!j || typeof j.handle_id !== "string") return null;
+      Agents.checked(j);
+      return agentStatusView(j);
+    },
+  },
+  subagent_steer: {
+    summary: (v) => `${Agents.labelFor(v.handle_id)}  ← ${String(v.message ?? "").split("\n")[0]}`,
+    input(t, v) {
+      if (typeof v.message !== "string") return false;
+      const c = chipRow([["to", Agents.labelFor(v.handle_id)]]);
+      if (c) { c.classList.add("first"); t.inp.append(c); }
+      const d = h("div", "md tmd");
+      d.innerHTML = md(v.message);
+      t.inp.append(h("div", "kv-key", "message"), d);
+    },
+    output(t, text, fail) {
+      const j = !fail && jsonObj(text);
+      if (!j || typeof j.acknowledged !== "boolean") return null;
+      if (j.acknowledged) Agents.steered(t.inputV?.handle_id, t.inputV?.message);
+      return h("div", j.acknowledged ? "ag-ok" : "ag-bad", j.acknowledged ? "✓ delivered to the subagent" : "✗ not acknowledged");
+    },
+  },
+  subagent_models: {
+    output(t, text, fail) {
+      const j = !fail && jsonObj(text);
+      if (!j || !Array.isArray(j.models)) return null;
+      const w = h("div", "chips first");
+      for (const m of j.models) {
+        const c = h("span", `kchip${m === j.foreground_model ? " fg" : ""}`);
+        c.append(h("span", "cv", String(m)));
+        if (m === j.foreground_model) c.title = "foreground model";
+        w.append(c);
+      }
+      return w;
     },
   },
   fetch: {
@@ -1437,7 +1523,423 @@ function toolDone(t, cls = "ok", label) {
   const ms = performance.now() - t.start;
   const dur = ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
   t.st.innerHTML = `<span>${label || (S.replaying ? "" : dur)}</span>${svg(cls === "ok" ? "check" : "x", S.replaying ? "i" : "i draw")}`;
+  if (t.agent) Agents.cardDone(t, cls === "ok");
   updateGroup(t.group);
+}
+
+// ── subagents: the TUI's subagent HUD, as a tray above the composer ──────────
+// Wire facts (SynapsCLI 0.10, captured from a real run on the sandbox):
+//   stream.agent.subagent_start  {subagent_id, agent_name, task_preview}: task_preview is
+//     the task's first 80 chars (resume: the new instructions'); inline agents are "inline".
+//   stream.agent.subagent_update {subagent_id, status}: "💭 thinking...", "⚙ <tool> (tool #N)"
+//     when a tool starts, then its detail once the input is known ("$ <cmd>", "reading f", …).
+//   stream.agent.subagent_done   {subagent_id, result_preview, duration_secs}
+//   ev subagent_rows {rows}: the registry at 1 Hz, ONLY while a turn streams. status is
+//     "running" | "completed" | "cancelled" | "timed_out" | {"failed": reason}.
+//   query subagent_rows: the same rows, status in Rust Debug form ("Running", "Failed(\"…\")").
+//   ev external, content_type "subagent_completion", data {subagent_id, status, duration_secs}.
+// start/update/done ride the stream of the turn that started the agent. A background
+// agent (subagent_start) outlives that turn and goes quiet, so while idle the tray polls
+// subagent_rows, and the completion arrives as the external event. A start/resume ack's
+// handle_id ties its card to the agent; status/collect results feed the agent's record.
+const Agents = (() => {
+  const box = $("agents");
+  const recs = new Map(); // subagent_id → record, for the attached session
+  const FLASH_MS = 8000; // a finished agent stays in the tray this long (the TUI: 5s)
+  const POLL_MS = 3000;
+  const TERMINAL = ["completed", "failed", "timed_out", "cancelled"];
+  const BAD = ["failed", "timed_out", "cancelled"];
+  let timer = 0, lastPoll = 0, raf = 0;
+  const dirty = new Set();
+  const now = () => Date.now();
+  const idOf = (hid) => { const m = /^sa_(\d+)$/.exec(String(hid ?? "")); return m ? Number(m[1]) : null; };
+  const prefix = (s, n) => Array.from(String(s ?? "")).slice(0, n).join(""); // Rust chars().take(n)
+  function norm(st) {
+    if (st && typeof st === "object") return { state: "failed", reason: String(st.failed ?? "") };
+    const s = String(st ?? "");
+    const f = /^Failed\((?:"([\s\S]*)"|([\s\S]*))\)$/.exec(s);
+    if (f) return { state: "failed", reason: f[1] ?? f[2] ?? "" };
+    return { state: s.replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase(), reason: "" };
+  }
+  const okId = (id) => Number.isSafeInteger(id) && id >= 0;
+  function rec(id, name) {
+    let r = recs.get(id);
+    if (!r) {
+      r = { id, handle: `sa_${id}`, name: name || "", role: "", task: "", model: "", resumedFrom: "", bg: undefined,
+        state: "running", reason: "", cancelling: false, step: "", trail: [], tools: 0, t0: now(), dur: null,
+        output: "", outKind: "", preview: "", doneAt: 0, announced: false, card: null, shown: true, open: false, el: null, q: null, v: 0 };
+      recs.set(id, r);
+    } else if (name && !r.name) r.name = name;
+    return r;
+  }
+  // A named agent's name, else its role (a fixed enum: planner, implementer, …); sa_N disambiguates.
+  const label = (r) => (r.name && r.name !== "inline" ? r.name : "") || r.role || "subagent";
+  const labelFor = (hid) => { const r = recs.get(idOf(hid)); return r ? `${label(r)} · ${r.handle}` : String(hid ?? ""); };
+  const fmtDur = (s) => {
+    const x = Math.max(0, Math.floor(s || 0));
+    if (x < 60) return `${x}s`;
+    const m = Math.floor(x / 60), sec = String(x % 60).padStart(2, "0");
+    return m < 60 ? `${m}:${sec}` : `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}:${sec}`;
+  };
+  const elapsed = (r) => (r.state === "running" ? (now() - r.t0) / 1000 : r.dur);
+  const gkey = (r) => (r.state === "running" ? (r.cancelling ? "cancelling" : "running") : r.state);
+  const firstLine = (s) => String(s || "").split("\n").map((l) => l.replace(/^\s*(?:#+|[-*>]|\d+\.)\s+/, "").replace(/\*\*|__|`/g, "").trim()).find(Boolean) || "";
+  // What the agent has said: its collected result, else (once it ended) the
+  // completion preview, else the last partial output a status/collect showed.
+  function said(r) {
+    if (r.output && r.outKind === "result") return ["result", r.output];
+    if (r.preview && r.state !== "running") return ["preview", r.preview];
+    if (r.output) return [r.outKind, r.output];
+    return r.preview ? ["preview", r.preview] : null;
+  }
+  function stepText(r) {
+    if (r.state === "running") return r.cancelling ? "cancelling…" : r.step || "starting…";
+    if (r.state === "completed") return firstLine(said(r)?.[1]) || "done";
+    if (r.state === "failed") return r.reason ? `failed: ${firstLine(r.reason)}` : "failed";
+    return r.state === "timed_out" ? "timed out" : "cancelled";
+  }
+  // Is this card the call behind a subagent_start whose task_preview (first 80 chars)
+  // is `preview`? start/oneshot: the task. resume (resume.rs): the instructions, a
+  // separator, then the prior context, which only the daemon knows → a prefix.
+  function previewOf(t, preview) {
+    const v = t.inputV;
+    if (typeof v?.task === "string") return prefix(v.task, 80) === preview;
+    if (typeof v?.instructions !== "string") return false;
+    const head = prefix(`${v.instructions}\n\n---\n[Prior conversation context from handle ${v.handle_id}]\n`, 80);
+    return Array.from(head).length === 80 ? head === preview : preview.startsWith(head);
+  }
+
+  // ── linking a card (subagent / subagent_start / subagent_resume) ──
+  function link(r, t) {
+    if (!t || r.card === t || (t.agent && t.agent !== r)) return;
+    if (r.card) { r.card.agent = null; r.card.agSec?.remove(); r.card.agSec = null; } // a guessed link, corrected by the ack
+    r.card = t; t.agent = r;
+    r.bg = baseName(t.name) !== "subagent"; // start/resume run in the background; the oneshot blocks
+    const v = t.inputV || {};
+    if (typeof v.task === "string") r.task = v.task;
+    if (v.role) r.role = String(v.role);
+    if (v.model) r.model = String(v.model);
+    if (typeof v.instructions === "string") {
+      r.task = v.instructions;
+      r.resumedFrom = String(v.handle_id ?? "");
+      const p = recs.get(idOf(v.handle_id));
+      if (p) { r.role ||= p.role; r.model ||= p.model; }
+    }
+    mark(r);
+  }
+  function onStart(e, ts) {
+    if (!okId(e.subagent_id)) return;
+    const r = rec(e.subagent_id, e.agent_name);
+    r.t0 = toDate(ts).getTime();
+    if (!r.task) r.task = e.task_preview || "";
+    // Its card: the newest unlinked subagent call whose task starts with the preview
+    // (else the newest one still running — the event lands before the tool result).
+    if (!r.card) {
+      const cands = [...S.turnTools.values()].filter((t) => t.kind === "subagent" && !t.agent).reverse();
+      link(r, cands.find((t) => previewOf(t, e.task_preview)) || cands.find((t) => !t.done));
+    }
+    mark(r);
+  }
+  function started(t, j) { // subagent_start / subagent_resume ack: {handle_id, agent_name, status}
+    const id = idOf(j.handle_id);
+    if (id == null) return;
+    const r = rec(id, j.agent_name);
+    if (j.resumed_from) r.resumedFrom = j.resumed_from;
+    link(r, t);
+    mark(r);
+  }
+  function onUpdate(e, ts) {
+    if (!okId(e.subagent_id)) return;
+    const r = rec(e.subagent_id, e.agent_name);
+    if (r.state !== "running") return;
+    const s = String(e.status ?? "");
+    let m;
+    if (/^💭/u.test(s)) r.step = "thinking…";
+    else if ((m = /^⚙\s*(.+?) \(tool #(\d+)\)$/u.exec(s))) { r.tools = Math.max(r.tools, Number(m[2])); r.step = m[1]; }
+    else if (s) {
+      r.step = s;
+      if (r.trail.at(-1)?.text !== s) { r.trail.push({ text: s, at: toDate(ts).getTime() }); if (r.trail.length > 500) r.trail.splice(0, r.trail.length - 500); r.v++; }
+    }
+    mark(r, false);
+  }
+  function onDone(e) {
+    if (!okId(e.subagent_id)) return;
+    const r = rec(e.subagent_id, e.agent_name);
+    const p = String(e.result_preview ?? "");
+    finish(r, p.startsWith("[TIMED OUT") ? "timed_out" : p.startsWith("ERROR") ? "failed" : "completed", { dur: e.duration_secs, exact: true, preview: p });
+  }
+  function completed(content) { // external subagent_completion: {text, data}
+    const d = content.data || {};
+    const id = d.subagent_id ?? idOf(d.handle_id);
+    if (!okId(id)) return;
+    const { state, reason } = norm(d.status);
+    const preview = /\bPreview: ([\s\S]*)$/.exec(String(content.text ?? ""))?.[1]; // finalize.rs: "… Preview: <≤300 chars>"
+    const r = rec(id, d.agent_name);
+    if (d.resumed_from && !r.resumedFrom) r.resumedFrom = d.resumed_from;
+    finish(r, state, { dur: d.duration_secs, exact: true, reason: d.error || reason, preview });
+  }
+  function finish(r, state, { dur, exact, preview, reason } = {}) {
+    if (preview && !r.preview) r.preview = preview;
+    if (r.state === "running") {
+      r.state = TERMINAL.includes(state) ? state : "failed";
+      r.reason = reason || r.reason;
+      r.dur = typeof dur === "number" ? dur : (now() - r.t0) / 1000;
+      r.doneAt = now(); r.cancelling = false;
+      announce(r);
+    } else if (exact && typeof dur === "number") r.dur = dur; // first report wins; the exact duration refines it
+    mark(r);
+  }
+  // A background agent's end gets a line in the transcript (it may land long after
+  // its card); a oneshot's card already says it.
+  function announce(r) {
+    if (r.announced || r.bg === false) return;
+    r.announced = true;
+    const verb = { completed: "finished", failed: "failed", timed_out: "timed out", cancelled: "was cancelled" }[r.state];
+    addSys(`⇠ ${label(r)} (${r.handle}) ${verb} · ${fmtDur(r.dur)}`, r.state === "completed" ? "" : "err");
+  }
+  function rows(list) { // registry snapshot — the TUI's reconcile rules
+    for (const row of Array.isArray(list) ? list : []) {
+      if (!okId(row?.subagent_id)) continue;
+      const { state, reason } = norm(row.status);
+      let r = recs.get(row.subagent_id);
+      if (!r) {
+        if (state !== "running" || row.cancel_requested) continue; // only adopt live agents
+        r = rec(row.subagent_id, row.agent_name);
+      }
+      if (r.state !== "running") continue;
+      if (typeof row.elapsed_secs === "number") r.t0 = now() - row.elapsed_secs * 1000;
+      if (r.cancelling !== !!row.cancel_requested) r.cancelling = !!row.cancel_requested;
+      if (state !== "running") finish(r, state, { dur: row.elapsed_secs, reason });
+      else mark(r, false);
+    }
+  }
+  function checked(j) { // subagent_status / subagent_collect result
+    const r = recs.get(idOf(j.handle_id));
+    if (!r) return;
+    if (typeof j.tool_count === "number" && j.tool_count > r.tools) r.tools = j.tool_count;
+    if (j.model) r.model = String(j.model);
+    const final = typeof j.output === "string";
+    const out = final ? j.output : j.partial_output ?? j.output_so_far;
+    if (typeof out === "string" && out && (final || r.outKind !== "result") && (out !== r.output)) { r.output = out; r.outKind = final ? "result" : "so far"; r.v++; }
+    const { state, reason } = norm(j.status);
+    if (TERMINAL.includes(state)) finish(r, state, { reason: reason || (state !== "completed" ? j.terminal_cause?.safe_message : "") });
+    else mark(r, false);
+  }
+  function steered(hid, msg) {
+    const r = recs.get(idOf(hid));
+    if (!r || typeof msg !== "string") return;
+    r.trail.push({ text: `↳ steered: ${firstLine(msg)}`, at: now(), steer: true });
+    mark(r);
+  }
+  // A oneshot's card ends with the agent: its result (or the turn stopping) finishes it.
+  function cardDone(t, ok) {
+    const r = t.agent;
+    if (!r || r.bg !== false || r.state !== "running") return;
+    finish(r, !ok ? "cancelled" : /^\[subagent:[^\]\n]* ERROR\]/.test(t.outRaw || "") ? "failed" : "completed");
+  }
+
+  // ── rendering ──
+  function mark(r, content = true) {
+    if (content) r.v++;
+    dirty.add(r);
+    if (!raf) raf = requestAnimationFrame(flush);
+    ensureTimer();
+  }
+  function flush() {
+    raf = 0;
+    for (const r of dirty) render(r);
+    dirty.clear();
+    RunState.render();
+  }
+  const FIELDS = `<span class="ag-glyph"></span><span class="ag-name"></span><span class="ag-id"></span><span class="ag-step"></span><span class="ag-tools"></span><span class="ag-time"></span>`;
+  const fieldsOf = (el) => { const q = (s) => el.querySelector(s); return { glyph: q(".ag-glyph"), name: q(".ag-name"), id: q(".ag-id"), step: q(".ag-step"), tools: q(".ag-tools"), time: q(".ag-time") }; };
+  function glyphHtml(gk) {
+    if (gk === "running") return '<span class="spinner"></span>';
+    if (gk === "completed") return svg("check", S.replaying ? "i" : "i draw");
+    if (gk === "failed") return svg("x", S.replaying ? "i" : "i draw");
+    return '<span class="ag-warn">⚠</span>';
+  }
+  function paint(f, r) {
+    const gk = gkey(r);
+    if (f.glyph._k !== gk) { f.glyph._k = gk; f.glyph.innerHTML = glyphHtml(gk); }
+    const set = (el, txt) => { if (el.textContent !== txt) el.textContent = txt; };
+    set(f.name, label(r));
+    set(f.id, r.handle);
+    set(f.step, stepText(r));
+    f.step.classList.toggle("think", gk === "running" && r.step === "thinking…");
+    set(f.tools, r.tools ? plural(r.tools, "tool") : "");
+    set(f.time, fmtDur(elapsed(r)));
+  }
+  function detailParts(r, { chips = true, task = true, output = true } = {}) {
+    const out = [];
+    if (chips) {
+      const c = chipRow([["agent", r.name && r.name !== "inline" ? r.name : null], ["model", r.model ? r.model.replace(/^.*\//, "") : null], ["resumes", r.resumedFrom || null]]);
+      if (c) { c.classList.add("first"); out.push(c); }
+    }
+    if (task && r.task) { const d = h("div", "md tmd"); d.innerHTML = md(r.task); out.push(h("div", "kv-key", "task"), d); }
+    if (r.trail.length) {
+      const ol = h("ol", "ag-trail");
+      const shown = r.trail.slice(-80);
+      if (r.trail.length > shown.length) ol.append(h("li", "t-note", `${r.trail.length - shown.length} earlier steps`));
+      for (const s of shown) {
+        const li = h("li", s.steer ? "steer" : null);
+        li.append(h("span", "ag-at", `+${fmtDur((s.at - r.t0) / 1000)}`), h("code", null, s.text));
+        ol.append(li);
+      }
+      out.push(h("div", "kv-key", `steps · ${r.trail.length}`), ol);
+    }
+    const got = output && said(r);
+    if (got) { const d = h("div", "md tmd"); d.innerHTML = md(got[1]); out.push(h("div", "kv-key", got[0]), d); }
+    if (!out.length) out.push(h("div", "t-empty", r.state === "running" ? "working…" : "no details"));
+    return out;
+  }
+  function goBtn(r) {
+    const b = h("button", "btn-ghost ag-go", "Show in transcript");
+    b.type = "button";
+    b.onclick = () => {
+      const t = r.card;
+      if (!t?.card.isConnected) return;
+      if (t.group && !t.group.el.open) t.group.el.open = true;
+      if (!t.card.classList.contains("open")) toggleTool(t.card);
+      unpinGesture();
+      t.card.scrollIntoView({ block: "center", behavior: motion() ? "smooth" : "auto" });
+      t.card.classList.remove("flash"); void t.card.offsetWidth; t.card.classList.add("flash");
+    };
+    return b;
+  }
+  function rowEl(r) {
+    if (r.el) return r.el;
+    const el = h("div", "ag");
+    el.innerHTML = `<button class="ag-row" type="button" aria-expanded="false">${FIELDS}${svg("chev", "i chev")}</button><div class="ag-detail hidden"></div>`;
+    r.el = el;
+    r.q = { ...fieldsOf(el), btn: el.querySelector(".ag-row"), detail: el.querySelector(".ag-detail") };
+    r.q.btn.onclick = () => { r.open = !r.open; if (!r.open) r.q.detail._v = -1; mark(r, false); };
+    box.append(el);
+    box.classList.remove("hidden");
+    if (!S.replaying) anim(el, [{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { duration: 240 });
+    return el;
+  }
+  function render(r) {
+    if (r.shown) {
+      rowEl(r);
+      r.el.dataset.state = gkey(r);
+      paint(r.q, r);
+      if (r.open && r.q.detail._v !== r.v) {
+        r.q.detail._v = r.v;
+        r.q.detail.replaceChildren(...detailParts(r), ...(r.card ? [goBtn(r)] : []));
+      }
+      r.q.detail.classList.toggle("hidden", !r.open);
+      r.q.btn.setAttribute("aria-expanded", String(r.open));
+      r.el.classList.toggle("open", r.open);
+    }
+    if (r.card) renderCard(r);
+  }
+  function renderCard(r) {
+    const t = r.card;
+    if (!t.agSec) {
+      t.agSec = h("div", "tool-sec agent");
+      t.agSec.innerHTML = `<div class="lbl">Subagent</div><div class="ag-line">${FIELDS}</div><div class="ag-body"></div>`;
+      t.outSec.before(t.agSec);
+      t.agQ = fieldsOf(t.agSec);
+    }
+    paint(t.agQ, r);
+    const body = t.agSec.querySelector(".ag-body");
+    if (body._v !== r.v) { body._v = r.v; body.replaceChildren(...detailParts(r, { chips: false, task: false, output: r.bg !== false })); }
+    // A background agent outlives its start call: the card's status is the agent's.
+    if (r.bg !== false && t.done && !t.card.classList.contains("err")) {
+      const gk = gkey(r);
+      if (t.st._ag !== gk || !t.st.querySelector(".ag-t")) {
+        t.st._ag = gk;
+        t.st.innerHTML = `<span class="ag-t"></span>${gk === "running" || gk === "cancelling" ? '<span class="spinner"></span>' : svg(gk === "completed" ? "check" : "x", S.replaying ? "i" : "i draw")}`;
+      }
+      t.st.querySelector(".ag-t").textContent = fmtDur(elapsed(r));
+      t.card.classList.toggle("ag-bad", BAD.includes(r.state));
+    }
+    if (t.group) updateGroup(t.group);
+  }
+  function hide(r) {
+    r.shown = false; r.open = false;
+    const el = r.el;
+    r.el = null; r.q = null;
+    if (!el) return;
+    const done = () => { el.remove(); box.classList.toggle("hidden", !box.children.length); };
+    const a = anim(el, [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(4px)" }], { duration: 200, easing: EASE.move });
+    if (a) a.onfinish = done; else done();
+  }
+
+  // ── clock: elapsed times, flash expiry, idle polling ──
+  function ensureTimer() { if (!timer) timer = setInterval(tick, 1000); }
+  function tick() {
+    const t = now();
+    let live = false, running = false;
+    for (const r of recs.values()) {
+      if (r.state === "running") running = true;
+      if (!r.shown) continue;
+      if (r.state !== "running" && t - r.doneAt > FLASH_MS && !r.open && !r.el?.matches(":hover")) { hide(r); continue; }
+      live = true;
+      if (r.state === "running") mark(r, false);
+    }
+    if (running && !S.streaming && S.sid && t - lastPoll >= POLL_MS) { lastPoll = t; poll(); }
+    if (!live && !running) { clearInterval(timer); timer = 0; }
+    RunState.render();
+  }
+  let polling = 0; // time the outstanding poll was sent (0 = none)
+  function poll() {
+    if (polling && now() - polling < 15000) return;
+    const sid = S.sid;
+    polling = now();
+    query({ query: "subagent_rows" }, (v) => { polling = 0; if (S.sid === sid && Array.isArray(v)) rows(v); });
+  }
+  function reset() {
+    for (const r of recs.values()) r.el?.remove();
+    recs.clear(); dirty.clear();
+    box.replaceChildren(); box.classList.add("hidden");
+    if (timer) { clearInterval(timer); timer = 0; }
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    lastPoll = 0; polling = 0;
+  }
+  // The thread's bottom padding grows with the tray, so nothing hides behind it.
+  new ResizeObserver(() => {
+    const hgt = box.classList.contains("hidden") ? 0 : box.getBoundingClientRect().height + 8;
+    T.style.setProperty("--agents-h", `${Math.round(hgt)}px`);
+    if (S.pinned && PREFS.autoscroll) stick();
+  }).observe(box);
+
+  function counts() {
+    let shown = 0, active = 0;
+    for (const r of recs.values()) if (r.shown) { shown++; if (r.state === "running") active++; }
+    return { shown, active, done: shown - active };
+  }
+  // Every entry point the event handlers call is guarded: a surprise in an agent
+  // event must never take down the stream handler around it.
+  const safe = (fn) => (...a) => { try { return fn(...a); } catch (e) { console.warn("synaps-dash: agents", e); } };
+  return {
+    onStart: safe(onStart), onUpdate: safe(onUpdate), onDone: safe(onDone), completed: safe(completed), rows: safe(rows),
+    started: safe(started), checked: safe(checked), steered: safe(steered), cardDone: safe(cardDone),
+    reset, seed: safe(poll), counts, norm, label, labelFor, get: (id) => recs.get(id),
+  };
+})();
+window.__agents = Agents; // test hook
+
+function agentStatusView(j) {
+  const w = h("div", "ag-status");
+  const { state, reason } = Agents.norm(j.status);
+  const row = h("div", "chips first");
+  row.append(h("span", `ag-pill ${state}`, state.replace(/_/g, " ")));
+  const c = chipRow([["elapsed", typeof j.elapsed_secs === "number" ? `${j.elapsed_secs}s` : null], ["tools", j.tool_count ?? null], ["model", j.model ? String(j.model).replace(/^.*\//, "") : null]]);
+  if (c) row.append(...c.children);
+  w.append(row);
+  const why = reason || (state !== "completed" ? j.terminal_cause?.safe_message : "");
+  if (why && state !== "running") w.append(h("div", "ag-bad", why));
+  if (typeof j.note === "string") w.append(h("div", "t-note", j.note));
+  const final = typeof j.output === "string";
+  const out = final ? j.output : j.partial_output ?? j.output_so_far;
+  if (typeof out === "string" && out.trim()) { const d = h("div", "md tmd"); d.innerHTML = md(out); w.append(h("div", "kv-key", final ? "result" : "so far"), d); }
+  else if (typeof out === "string") w.append(h("div", "t-empty", "no output yet"));
+  const extra = {};
+  for (const k of ["terminal_cause", "authorization"]) if (j[k]) extra[k] = j[k];
+  if (Object.keys(extra).length) { const d = h("details", "tdet"); d.append(h("summary", null, "details"), jsonTree(extra)); w.append(d); }
+  return w;
 }
 
 function renderTail(tail, cutAfterLastUser = false) {
@@ -1709,6 +2211,7 @@ function onAttached(a) {
   Ctx.reset(); Ctx.refresh(); // estimate now; measured once the next request reports Usage
   T.innerHTML = "";
   S.steers = [];
+  Agents.reset();
   // `replay` holds the LAST turn even after it finished — apply it only mid-turn,
   // else the finished turn renders twice (display_tail already has it).
   const replay = a.streaming ? (a.replay ?? []) : [];
@@ -1724,6 +2227,7 @@ function onAttached(a) {
   S.compacting = false;
   if (S.streaming && !S.cur) newAsst();
   for (const p of a.pending_prompts ?? []) showPrompt(p);
+  Agents.seed(); // background agents still running (no events reach a fresh attach)
   renderPresence(); renderComposer(); renderSessions();
   send({ type: "sessions" }); // refresh the live list so a just-resumed session moves out of Recent
   loadPast();
@@ -1803,7 +2307,7 @@ function onEvent(e, ts) {
       renderPresence(); renderComposer(); return;
     case "aborted": S.streaming = false; finishAsst(); addSys("turn stopped", "err"); renderComposer(); return;
     case "ended": addSys("session ended", "err"); S.sid = null; renderComposer(); return;
-    case "cleared": T.innerHTML = ""; S.steers = []; S.sid = e.session_id; emptyState("Fresh session", "The conversation was cleared."); Ctx.stale(); return;
+    case "cleared": T.innerHTML = ""; S.steers = []; Agents.reset(); S.sid = e.session_id; emptyState("Fresh session", "The conversation was cleared."); Ctx.stale(); return;
     case "refused":
       if (e.client === S.me) {
         toast(`Refused: ${e.reason}`, "err", 5000);
@@ -1831,6 +2335,10 @@ function onEvent(e, ts) {
       return;
     }
     case "cost_cap_reached": return addSys(`cost cap reached (${e.scope})`, "err");
+    case "subagent_rows": return Agents.rows(e.rows);
+    case "external":
+      if (e.event?.content?.content_type === "subagent_completion") Agents.completed(e.event.content);
+      return;
   }
 }
 
@@ -1853,8 +2361,9 @@ function onStream(s, ts) {
     else if (s.session === "notice") addSys(s.text);
   } else if (s.kind === "agent") {
     if (s.agent === "steering_delivered") { const st = findSteer(s.message); if (st) { setSteer(st, "delivered", ts); landSteer(st); } }
-    else if (s.agent === "subagent_start") addSys(`⇢ ${s.agent_name}: ${s.task_preview}`);
-    else if (s.agent === "subagent_done") addSys(`⇠ ${s.agent_name} done · ${s.duration_secs.toFixed(1)}s`);
+    else if (s.agent === "subagent_start") Agents.onStart(s, ts);
+    else if (s.agent === "subagent_update") Agents.onUpdate(s, ts);
+    else if (s.agent === "subagent_done") Agents.onDone(s);
   }
 }
 
