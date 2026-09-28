@@ -1368,7 +1368,7 @@ const TOOL_VIEWS = {
     output(t, text, fail) {
       const j = !fail && jsonObj(text);
       if (!j || typeof j.handle_id !== "string") return null;
-      Agents.checked(j, t);
+      Agents.checked(j);
       return agentStatusView(j);
     },
   },
@@ -1537,8 +1537,8 @@ function toolDone(t, cls = "ok", label) {
 //   ev external, content_type "subagent_completion", data {subagent_id, status, duration_secs}.
 // start/update/done ride the stream of the turn that started the agent. A background
 // agent (subagent_start) outlives that turn and goes quiet, so while idle the tray polls
-// subagent_rows, and the completion arrives as the external event. Tool results that
-// carry a handle_id (start/resume ack, status, collect) tie cards to agents.
+// subagent_rows, and the completion arrives as the external event. A start/resume ack's
+// handle_id ties its card to the agent; status/collect results feed the agent's record.
 const Agents = (() => {
   const box = $("agents");
   const recs = new Map(); // subagent_id → record, for the attached session
@@ -1558,6 +1558,7 @@ const Agents = (() => {
     if (f) return { state: "failed", reason: f[1] ?? f[2] ?? "" };
     return { state: s.replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase(), reason: "" };
   }
+  const okId = (id) => Number.isSafeInteger(id) && id >= 0;
   function rec(id, name) {
     let r = recs.get(id);
     if (!r) {
@@ -1624,6 +1625,7 @@ const Agents = (() => {
     mark(r);
   }
   function onStart(e, ts) {
+    if (!okId(e.subagent_id)) return;
     const r = rec(e.subagent_id, e.agent_name);
     r.t0 = toDate(ts).getTime();
     if (!r.task) r.task = e.task_preview || "";
@@ -1644,6 +1646,7 @@ const Agents = (() => {
     mark(r);
   }
   function onUpdate(e, ts) {
+    if (!okId(e.subagent_id)) return;
     const r = rec(e.subagent_id, e.agent_name);
     if (r.state !== "running") return;
     const s = String(e.status ?? "");
@@ -1657,6 +1660,7 @@ const Agents = (() => {
     mark(r, false);
   }
   function onDone(e) {
+    if (!okId(e.subagent_id)) return;
     const r = rec(e.subagent_id, e.agent_name);
     const p = String(e.result_preview ?? "");
     finish(r, p.startsWith("[TIMED OUT") ? "timed_out" : p.startsWith("ERROR") ? "failed" : "completed", { dur: e.duration_secs, exact: true, preview: p });
@@ -1664,7 +1668,7 @@ const Agents = (() => {
   function completed(content) { // external subagent_completion: {text, data}
     const d = content.data || {};
     const id = d.subagent_id ?? idOf(d.handle_id);
-    if (id == null) return;
+    if (!okId(id)) return;
     const { state, reason } = norm(d.status);
     const preview = /\bPreview: ([\s\S]*)$/.exec(String(content.text ?? ""))?.[1]; // finalize.rs: "… Preview: <≤300 chars>"
     const r = rec(id, d.agent_name);
@@ -1691,7 +1695,8 @@ const Agents = (() => {
     addSys(`⇠ ${label(r)} (${r.handle}) ${verb} · ${fmtDur(r.dur)}`, r.state === "completed" ? "" : "err");
   }
   function rows(list) { // registry snapshot — the TUI's reconcile rules
-    for (const row of list || []) {
+    for (const row of Array.isArray(list) ? list : []) {
+      if (!okId(row?.subagent_id)) continue;
       const { state, reason } = norm(row.status);
       let r = recs.get(row.subagent_id);
       if (!r) {
@@ -1875,16 +1880,20 @@ const Agents = (() => {
     if (!live && !running) { clearInterval(timer); timer = 0; }
     RunState.render();
   }
+  let polling = 0; // time the outstanding poll was sent (0 = none)
   function poll() {
+    if (polling && now() - polling < 15000) return;
     const sid = S.sid;
-    query({ query: "subagent_rows" }, (v) => { if (S.sid === sid && Array.isArray(v)) rows(v); });
+    polling = now();
+    query({ query: "subagent_rows" }, (v) => { polling = 0; if (S.sid === sid && Array.isArray(v)) rows(v); });
   }
   function reset() {
     for (const r of recs.values()) r.el?.remove();
     recs.clear(); dirty.clear();
     box.replaceChildren(); box.classList.add("hidden");
     if (timer) { clearInterval(timer); timer = 0; }
-    lastPoll = 0;
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    lastPoll = 0; polling = 0;
   }
   // The thread's bottom padding grows with the tray, so nothing hides behind it.
   new ResizeObserver(() => {
@@ -1898,7 +1907,14 @@ const Agents = (() => {
     for (const r of recs.values()) if (r.shown) { shown++; if (r.state === "running") active++; }
     return { shown, active, done: shown - active };
   }
-  return { onStart, onUpdate, onDone, completed, rows, started, checked, steered, cardDone, reset, seed: poll, counts, norm, label, labelFor, get: (id) => recs.get(id) };
+  // Every entry point the event handlers call is guarded: a surprise in an agent
+  // event must never take down the stream handler around it.
+  const safe = (fn) => (...a) => { try { return fn(...a); } catch (e) { console.warn("synaps-dash: agents", e); } };
+  return {
+    onStart: safe(onStart), onUpdate: safe(onUpdate), onDone: safe(onDone), completed: safe(completed), rows: safe(rows),
+    started: safe(started), checked: safe(checked), steered: safe(steered), cardDone: safe(cardDone),
+    reset, seed: safe(poll), counts, norm, label, labelFor, get: (id) => recs.get(id),
+  };
 })();
 window.__agents = Agents; // test hook
 

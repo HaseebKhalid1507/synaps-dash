@@ -199,12 +199,27 @@ const expect = (name, ok, detail) => { if (!ok) fail.push(`${name}${detail !== u
   for (const [id, n] of [[10, "sa_10"], [11, "sa_11"]]) await ev({ ev: "external", event: { content: { content_type: "subagent_completion", text: `Subagent 'inline' (${n}) finished with status 'completed' after 1.0s. Preview: ok`, data: { subagent_id: id, handle_id: n, status: "completed", duration_secs: 1 } } } });
   await st({ kind: "llm", llm: "tool_result", tool_id: "tZ", result: "Tool execution failed: nope" });
 
+  // A16 malformed agent events: ignored, never thrown, no phantom rows
+  const before = (await snap()).rows.length;
+  const thrown = await p.evaluate(() => {
+    const bad = [{ kind: "agent", agent: "subagent_update" }, { kind: "agent", agent: "subagent_start", subagent_id: "x" }, { kind: "agent", agent: "subagent_done", subagent_id: null, duration_secs: "?" }];
+    try {
+      for (const e of bad) onStream(e, new Date().toISOString());
+      onEvent({ ev: "subagent_rows", rows: [null, { status: 5 }, { subagent_id: -1, status: "Running" }] });
+      onEvent({ ev: "subagent_rows" });
+      onEvent({ ev: "external", event: { content: { content_type: "subagent_completion" } } });
+      return null;
+    } catch (e) { return e.message; }
+  });
+  await frame(); s = await snap();
+  expect("A16 malformed events: no throw, no phantom rows", thrown === null && s.rows.length === before && !s.rows.some((r) => /undefined|null|NaN/.test(r.id)), { thrown, rows: s.rows });
+
   // A12 escaping
   const pwn = await p.evaluate(() => ({ pwn: window.__pwn ?? null, imgs: document.querySelectorAll("#agents img, #thread .tool img").length }));
   expect("A12 nothing injected", pwn.pwn === null && pwn.imgs === 0, pwn);
 
   // A13 finished rows leave after the flash; the tray collapses and gives the room back
-  await p.waitForTimeout(9500);
+  await p.waitForFunction(() => document.getElementById("agents").classList.contains("hidden"), null, { timeout: 12000 }).catch(() => {});
   s = await snap();
   expect("A13 flash expiry empties the tray", s.hidden && s.rows.length === 0 && (s.agentsH === "0px" || s.agentsH === ""), { hidden: s.hidden, rows: s.rows, h: s.agentsH });
   expect("A13 run state back to ready", s.runState === "ready", s.run);
