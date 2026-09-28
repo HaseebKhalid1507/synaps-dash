@@ -54,7 +54,8 @@ const expect = (name, ok, detail) => { if (!ok) fail.push(`${name}${detail !== u
   await open(m); await m.click("#new-session"); await settle(m); s = await state(m);
   expect("phone: New session closes", !s.open && s.aria === "false", s);
 
-  await open(m); await m.mouse.click(150, 400); await settle(m); s = await state(m);    // inside the drawer
+  // inside the drawer, on its own chrome (not a session row: picking one navigates and closes it)
+  await open(m); { const r = await m.locator("#rail .brand").boundingBox(); await m.mouse.click(r.x + r.width - 8, r.y + r.height / 2); } await settle(m); s = await state(m);
   expect("phone: tapping inside the drawer keeps it open", s.open && s.railVisible, s);
   expect("phone: no page errors", m.errs.length === 0, m.errs);
 
