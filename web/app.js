@@ -1594,11 +1594,21 @@ const Agents = (() => {
     if (r.state === "failed") return r.reason ? `failed: ${firstLine(r.reason)}` : "failed";
     return r.state === "timed_out" ? "timed out" : "cancelled";
   }
-  const taskOf = (t) => { const v = t.inputV; return typeof v?.task === "string" ? v.task : typeof v?.instructions === "string" ? v.instructions : ""; };
+  // Is this card the call behind a subagent_start whose task_preview (first 80 chars)
+  // is `preview`? start/oneshot: the task. resume (resume.rs): the instructions, a
+  // separator, then the prior context, which only the daemon knows → a prefix.
+  function previewOf(t, preview) {
+    const v = t.inputV;
+    if (typeof v?.task === "string") return prefix(v.task, 80) === preview;
+    if (typeof v?.instructions !== "string") return false;
+    const head = prefix(`${v.instructions}\n\n---\n[Prior conversation context from handle ${v.handle_id}]\n`, 80);
+    return Array.from(head).length === 80 ? head === preview : preview.startsWith(head);
+  }
 
   // ── linking a card (subagent / subagent_start / subagent_resume) ──
   function link(r, t) {
     if (!t || r.card === t || (t.agent && t.agent !== r)) return;
+    if (r.card) { r.card.agent = null; r.card.agSec?.remove(); r.card.agSec = null; } // a guessed link, corrected by the ack
     r.card = t; t.agent = r;
     r.bg = baseName(t.name) !== "subagent"; // start/resume run in the background; the oneshot blocks
     const v = t.inputV || {};
@@ -1619,8 +1629,10 @@ const Agents = (() => {
     if (!r.task) r.task = e.task_preview || "";
     // Its card: the newest unlinked subagent call whose task starts with the preview
     // (else the newest one still running — the event lands before the tool result).
-    const cands = [...S.turnTools.values()].filter((t) => t.kind === "subagent" && !t.agent).reverse();
-    link(r, cands.find((t) => prefix(taskOf(t), 80) === e.task_preview) || cands.find((t) => !t.done));
+    if (!r.card) {
+      const cands = [...S.turnTools.values()].filter((t) => t.kind === "subagent" && !t.agent).reverse();
+      link(r, cands.find((t) => previewOf(t, e.task_preview)) || cands.find((t) => !t.done));
+    }
     mark(r);
   }
   function started(t, j) { // subagent_start / subagent_resume ack: {handle_id, agent_name, status}

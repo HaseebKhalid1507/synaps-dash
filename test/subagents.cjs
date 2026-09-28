@@ -177,6 +177,28 @@ const expect = (name, ok, detail) => { if (!ok) fail.push(`${name}${detail !== u
   await frame(); s = await snap();
   expect("A11 aborted turn cancels its oneshot", s.rows.find((r) => r.id === "sa_9")?.state === "cancelled", s.rows);
 
+  // A15 resume: linked by the RESUMED task's preview (instructions + separator + prior
+  // context), not the newest running card; inherits the prior agent's role
+  await tool("tR", "subagent_resume", { handle_id: "sa_1", instructions: "Now also count the files." });
+  await tool("tX", "subagent", { task: "decoy oneshot, still running" }); // newer, unlinked, running
+  const RESUMED = "Now also count the files.\n\n---\n[Prior conversation context from handle sa_1]\n[{\"role\":\"user\"}]";
+  await agent({ agent: "subagent_start", subagent_id: 10, agent_name: "inline", task_preview: Array.from(RESUMED).slice(0, 80).join("") });
+  await frame(); s = await snap();
+  expect("A15 resume event links the resume card, not the newer decoy", /Subagent/.test(card(s, "subagent_resume").agent || "") && card(s, "subagent").agent === null, { resume: card(s, "subagent_resume").agent, decoy: card(s, "subagent").agent });
+  await st({ kind: "llm", llm: "tool_result", tool_id: "tR", result: JSON.stringify({ handle_id: "sa_10", resumed_from: "sa_1", agent_name: "inline", status: "running" }) });
+  await st({ kind: "llm", llm: "tool_result", tool_id: "tX", result: "[subagent:inline] fine" });
+  await frame(); s = await snap();
+  const r10 = s.rows.find((r) => r.id === "sa_10");
+  expect("A15 resumed agent: role inherited, summary names the handle", r10?.name === "implementer" && /^sa_1 ↻ Now also count/.test(card(s, "subagent_resume").sum) && card(s, "subagent_resume").outHidden, { r10, c: card(s, "subagent_resume") });
+  // ack before the event: the event must not re-link the agent to another card
+  await tool("tY", "subagent_start", { role: "tester", system_prompt: "x", task: "ack first" }, JSON.stringify({ handle_id: "sa_11", agent_name: "inline", status: "running" }));
+  await tool("tZ", "subagent_start", { role: "planner", system_prompt: "x", task: "second, pending" });
+  await agent({ agent: "subagent_start", subagent_id: 11, agent_name: "inline", task_preview: "ack first" });
+  await frame(); s = await snap();
+  expect("A15 ack-first: stays on its own card", /Subagent/.test(card(s, "subagent_start", -2).agent || "") && card(s, "subagent_start", -1).agent === null, s.cards.slice(-2).map((c) => c.agent));
+  for (const [id, n] of [[10, "sa_10"], [11, "sa_11"]]) await ev({ ev: "external", event: { content: { content_type: "subagent_completion", text: `Subagent 'inline' (${n}) finished with status 'completed' after 1.0s. Preview: ok`, data: { subagent_id: id, handle_id: n, status: "completed", duration_secs: 1 } } } });
+  await st({ kind: "llm", llm: "tool_result", tool_id: "tZ", result: "Tool execution failed: nope" });
+
   // A12 escaping
   const pwn = await p.evaluate(() => ({ pwn: window.__pwn ?? null, imgs: document.querySelectorAll("#agents img, #thread .tool img").length }));
   expect("A12 nothing injected", pwn.pwn === null && pwn.imgs === 0, pwn);
