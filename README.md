@@ -207,6 +207,7 @@ config's hash is unchanged.
 | `test/config.cjs` | Synaps config sections: UI → disk for every control type, reset, favorites, plugins, providers leak nothing, failed writes snap back |
 | `test/config-reload.cjs` | a config change is ignored until `daemon reload`, applied after it; the old token dies |
 | `test/sessions.cjs` | Live/Recent split by client count, no bodies in `/api/sessions`, resume keeps the id and history |
+| `test/empty-start.cjs` | no live session: the box stays usable and every letter stays; Enter starts ONE session and sends the text as its first turn (real reply); an ended session leaves the same box. Needs a sandbox with no live session |
 | `test/run-state.cjs` | header pill states, TUI spinner frames + cadence, pulse, layout, reconnect, reduced motion |
 | `test/glow.cjs` | glow speed ramps slow → fast → slow both ways, never snaps, settles and stops at idle, static under reduced motion |
 | `test/subagents.cjs` | subagent tray, header count, card linking (incl. unicode task previews), status/collect/steer/models views, registry rows in both status shapes, external completion, flash expiry, layout; then a real blocking + background subagent, incl. idle polling (`SKIP_LIVE=1` skips it) |

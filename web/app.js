@@ -55,6 +55,7 @@ const S = {
   sid: null, me: null, owner: null, clients: new Map(),
   streaming: false, compacting: false, replaying: false,
   wantSid: null, wantMode: "mirror", wantCreate: false, wantContinue: null, intentionalClose: false, retry: 0,
+  startOnAttach: null, // Set of the live session ids when Enter started a session from an empty box (startSession)
   cur: null, localSubmit: null, steers: [], // steer bubbles + their delivery state
   qid: 1, queries: new Map(), prompt: null, model: "",
   turnTools: new Map(), // tool_id → card, across split segments of the current turn
@@ -1999,15 +2000,19 @@ function renderComposer() {
   RunState.render();
   Ctx.render();
   const own = isOwner();
+  // No session attached (none live yet, or it ended): the box still takes text, and Enter
+  // starts a new session with it as the first turn (doSend → startSession). Before, typing
+  // ran this with nothing to own and the first keystroke disabled the box.
+  const fresh = !S.sid;
   $("watchbar").classList.toggle("hidden", own || !S.sid);
   if (!own && S.sid) $("watch-text").textContent = S.owner != null ? `Watching — ${who(S.owner)} is driving` : "Watching — nobody owns input";
-  $("input").disabled = !own;
-  $("input").placeholder = own ? (S.streaming ? "Steer the running turn…" : "Message synaps…") : "Take over to type";
+  $("input").disabled = !own && !fresh;
+  $("input").placeholder = fresh ? "Message synaps… (Enter starts a new session)" : own ? (S.streaming ? "Steer the running turn…" : "Message synaps…") : "Take over to type";
   const send = $("send");
   const stop = own && S.streaming && !$("input").value.trim();
   send.classList.toggle("stop", stop);
   send.title = stop ? "Stop (Esc)" : S.streaming ? "Steer (Enter)" : "Send (Enter)";
-  send.disabled = !own;
+  send.disabled = !own && !fresh;
 }
 function ago(iso) {
   const s = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -2145,6 +2150,7 @@ function loadPast() {
   fetch("/api/sessions?limit=60").then((r) => r.json()).then((d) => { S.past = d.sessions || []; renderSessions(); }).catch(() => {});
 }
 function switchTo(sid, mode, create = false) {
+  S.startOnAttach = null; // an explicit switch cancels a start from the empty box
   S.threadFade = anim(T, [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-6px)" }], { duration: 140, easing: EASE.move, fill: "forwards" });
   S.wantSid = sid; S.wantMode = mode;
   // create can be `true` (blank new session) or `{ continue: <id> }` (resume a
@@ -2159,11 +2165,11 @@ function onFrame(f) {
   switch (f.type) {
     case "mxc": S.album = f.palette; return applyTheme();
     case "welcome": return onWelcome(f);
-    case "refused": setConn("down", "refused"); toast(f.message, "err", 8000); return;
+    case "refused": S.startOnAttach = null; setConn("down", "refused"); toast(f.message, "err", 8000); return;
     case "session_list": S.sessions = f.sessions; renderSessions(); return;
     case "attached": return onAttached(f);
     case "event": if (f.session_id === S.sid) onEvent(f.event, f.ts); return;
-    case "error": toast(f.message, "err", 6000); return;
+    case "error": S.startOnAttach = null; toast(f.message, "err", 6000); return;
   }
 }
 
@@ -2189,7 +2195,7 @@ function onWelcome(w) {
     target = (sorted.find((s) => s.clients > 0) ?? sorted[0])?.id ?? null;
   }
   if (target) send({ type: "attach", attach: "existing", session_id: target, mode: S.wantMode });
-  else emptyState("No live sessions", "Start one with + New session, or run synaps --attach in a terminal.");
+  else { emptyState("No live sessions", "Type a message to start one, use + New session, or run synaps --attach in a terminal."); renderComposer(); }
   S.wantMode = "mirror";
 }
 
@@ -2233,6 +2239,11 @@ function onAttached(a) {
   loadPast();
   requestAnimationFrame(pin);
   if (isOwner()) $("input").focus();
+  // Typed with no session (startSession): send it now as this session's first turn, but
+  // only into a session that did not exist when Enter was pressed — never someone else's.
+  const before = S.startOnAttach;
+  S.startOnAttach = null;
+  if (before && !before.has(S.sid) && isOwner()) doSend();
 }
 
 function onEvent(e, ts) {
@@ -2394,7 +2405,8 @@ $("modal-no").onclick = () => answer(S.prompt?.kind === "secret" ? null : "n");
 function doSend() {
   const input = $("input");
   const text = input.value.trim();
-  if (!S.sid || !isOwner()) return;
+  if (!S.sid) { if (text && !S.startOnAttach) startSession(); return; }
+  if (!isOwner()) return;
   // Mid-switch / reconnecting: the socket is closing, a send would be silently
   // dropped (and the bubble + cleared box would say it went). Keep the text.
   if (S.intentionalClose || S.ws?.readyState !== WebSocket.OPEN) {
@@ -2407,6 +2419,13 @@ function doSend() {
   else { finishAsst(); addUser(text, "you"); S.localSubmit = text; cmd({ cmd: "submit", text, attachments: [] }); }
   pin();
   input.value = ""; autosize(); renderComposer();
+}
+// Enter with no session attached: start one — the "+ New session" path — and remember the
+// live sessions that exist now, so onAttached sends the box only into the new one. The text
+// stays in the box until then: a failed start loses nothing, and a second Enter is a no-op.
+function startSession() {
+  switchTo(null, "mirror", true);
+  S.startOnAttach = new Set(S.sessions.map((x) => x.id));
 }
 function autosize() {
   const i = $("input");
