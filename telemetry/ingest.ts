@@ -420,15 +420,19 @@ function ingestWorkers(ctx: Ctx, r: HostRoot, deadline: number) {
 
 /** Derive `sessions` from every host's copies.
  *  - data (title, totals, cost) from the newest copy;
- *  - host = ORIGIN, decided among the hosts holding a copy, in order:
+ *  - host = ORIGIN, decided first, among the hosts holding a copy, in order:
  *      1. the host whose api-log span covers `created`;
  *      2. (several or none) the host with the most activity inside [created, updated]: api-log
  *         rows + synaps.log `Token Usage:` lines (that machine was doing the work);
  *      3. the earliest copy: oldest `updated`, then oldest file mtime at 1 s precision
- *         (copies made with cp -p/rsync keep whole-second mtimes), then host name;
- *  - grain = 'session' only when no request row on ANY host overlaps [created, updated]:
- *    otherwise its spend is (at least partly) request-level already, and adding
- *    session_cost would double-count. Sessions straddling a cutover are request grain.
+ *         (copies made with cp -p/rsync keep whole-second mtimes);
+ *      nothing decides (identical copies, no activity) → "unknown", never a coin flip;
+ *  - grain = 'request' when the session's spend is already in api-log rows, else 'session':
+ *      a. rows linked to it (#322 session_id, or parent_session_id for its workers), or
+ *      b. unlinked (pre-#322) rows on the ORIGIN host inside [created, updated]
+ *         (unknown origin: on any host holding a copy).
+ *    Another host's rows never cover a session (they're that host's work), so a bella-only
+ *    session during jade's api-log span with no bella rows keeps its session_cost.
  *    One decision per session, independent of the host filter, so per-host sums add up. */
 const originMemo = new Map<string, { sig: string; host: string }>();
 
@@ -436,12 +440,13 @@ export function rebuildSessions(db: Database) {
   const spans = new Map((db.query(`SELECT host, MIN(ts) a, MAX(ts) b FROM requests GROUP BY host`).all() as any[]).map((x) => [x.host, x]));
   const spanSig = [...spans.values()].map((s) => `${s.host}:${s.a}`).join(",");
   const copies = db.query(`SELECT * FROM session_copies ORDER BY id`).all() as any[];
-  const overlap = db.query(`SELECT 1 FROM requests WHERE ts >= ? AND ts <= ? LIMIT 1`);
+  const linked = db.query(`SELECT 1 FROM requests WHERE sid = ? LIMIT 1`);
+  const unlinked = db.query(`SELECT 1 FROM requests INDEXED BY requests_unlinked WHERE runtime_session_id IS NULL AND host = ? AND ts >= ? AND ts <= ? LIMIT 1`);
   const legacyAct = db.query(`SELECT COUNT(*) n FROM (SELECT 1 FROM legacy_usage WHERE host = ? AND ts >= ? AND ts <= ? LIMIT 500)`);
   const reqAct = db.query(`SELECT COUNT(*) n FROM (SELECT 1 FROM requests WHERE host = ? AND ts >= ? AND ts <= ? LIMIT 500)`);
-  const activity = { get: (h: string, a: number, b: number) => ({ n: (legacyAct.get(h, a, b) as any).n + (reqAct.get(h, a, b) as any).n }) };
+  const activity = (h: string, a: number, b: number) => (legacyAct.get(h, a, b) as any).n + (reqAct.get(h, a, b) as any).n;
   const ins = db.prepare(`INSERT INTO sessions VALUES ($id,$host,$copies,$title,$title_raw,$model,$created,$updated,$created_day,$input,$output,$cache_read,$cache_write,$cost,$saved,$saved_net,$message_count,$grain)`);
-  const earliest = (a: any, b: any) => a.updated - b.updated || Math.floor(a.mtime / 1000) - Math.floor(b.mtime / 1000) || (a.host < b.host ? -1 : 1);
+  const age = (a: any, b: any) => a.updated - b.updated || Math.floor(a.mtime / 1000) - Math.floor(b.mtime / 1000);
   const origin = (group: any[], created: number, updated: number): string => {
     if (group.length === 1) return group[0].host;
     const sig = `${spanSig}|${group.map((c) => `${c.host}:${c.updated}:${c.mtime}`).join(",")}`;
@@ -450,11 +455,13 @@ export function rebuildSessions(db: Database) {
     let cands = group.filter((c) => { const s = spans.get(c.host); return s && s.a <= created && created <= s.b; });
     if (cands.length !== 1) {
       const pool = cands.length ? cands : group;
-      const act = pool.map((c) => ({ c, n: (activity.get(c.host, created, updated) as any).n as number }));
+      const act = pool.map((c) => ({ c, n: activity(c.host, created, updated) }));
       const best = Math.max(...act.map((x) => x.n));
       cands = best > 0 ? act.filter((x) => x.n === best).map((x) => x.c) : pool;
     }
-    const host = cands.slice().sort(earliest)[0].host;
+    const sorted = cands.slice().sort(age);
+    const tied = sorted.length > 1 && age(sorted[0], sorted[1]) === 0 && sorted[0].host !== sorted[1].host;
+    const host = tied ? "unknown" : sorted[0].host;
     originMemo.set(group[0].id, { sig, host });
     return host;
   };
@@ -466,16 +473,19 @@ export function rebuildSessions(db: Database) {
       for (; i < copies.length && copies[i].id === id; i++) group.push(copies[i]);
       const newest = group.reduce((a, b) => (b.updated > a.updated || (b.updated === a.updated && b.mtime > a.mtime) ? b : a));
       const created = Math.min(...group.map((c) => c.created));
+      const host = origin(group, created, newest.updated);
+      const grainHosts = host === "unknown" ? [...new Set(group.map((c) => c.host))] : [host];
+      const covered = !!linked.get(id) || grainHosts.some((h) => unlinked.get(h, created, newest.updated));
       const prompt = newest.input + (newest.cache_read ?? 0) + (newest.cache_write ?? 0);
       // Per-request prompt size picks the Haiku 5.5 tier; a session total is not one prompt.
       const perReq = prompt / Math.max(1, Math.round((newest.message_count ?? 2) / 2));
       ins.run(bind({
-        id, host: origin(group, created, newest.updated), copies: group.length, title: newest.title, title_raw: newest.title_raw, model: newest.model, created, updated: newest.updated,
+        id, host, copies: group.length, title: newest.title, title_raw: newest.title_raw, model: newest.model, created, updated: newest.updated,
         created_day: dayOf(created), input: newest.input, output: newest.output, cache_read: newest.cache_read, cache_write: newest.cache_write,
         cost: newest.cost, message_count: newest.message_count,
         saved: cacheSavings(newest.model, newest.input, newest.cache_read ?? 0, newest.cache_write ?? 0, 0, perReq),
         saved_net: cacheNetSavings(newest.model, newest.input, newest.cache_read ?? 0, newest.cache_write ?? 0, 0, perReq),
-        grain: overlap.get(created, newest.updated) ? "request" : "session",
+        grain: covered ? "request" : "session",
       }));
     }
   })();

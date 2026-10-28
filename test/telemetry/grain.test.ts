@@ -1,11 +1,12 @@
 // Spend accounting: one grain decision per session, origin host labels, additivity across hosts.
-import { test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { test, expect, beforeAll, afterAll, describe } from "bun:test";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { openDb, metaSet } from "../../telemetry/schema.ts";
-import { ingestOnce, resolveRoot, refreshReleases } from "../../telemetry/ingest.ts";
+import { ingestOnce, resolveRoot, refreshReleases, rebuildSessions } from "../../telemetry/ingest.ts";
+import { handleTelemetry } from "../../telemetry/http.ts";
 import { TelemetryQuery, type Filter } from "../../telemetry/query.ts";
 import { sandbox } from "./helpers.ts";
 
@@ -16,7 +17,7 @@ beforeAll(() => {
   const db = openDb(sb.db);
   ingestOnce(db, [resolveRoot("bella", sb.bella), resolveRoot("jade", sb.jade)]);
   q = new TelemetryQuery(db);
-});
+}, 60_000);
 afterAll(() => sb.done());
 
 const sess = (id: string) => q.db.query("SELECT host, grain, cost, copies FROM sessions WHERE id = ?").get(id) as any;
@@ -85,4 +86,66 @@ test("releases: minor releases (vX.Y.0) only, inside the range; read async by th
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
+});
+
+describe("origin first, then grain on the origin host only", () => {
+  // bella's api-log has a gap; jade's api-log spans it. A bella-only session in that gap with
+  // bella Token Usage activity and no bella rows must keep its session_cost (it ran on bella).
+  let sb2: ReturnType<typeof sandbox>;
+  let q2: TelemetryQuery;
+  const J = (o: unknown) => JSON.stringify(o);
+  const req = (id: string, ts: number) => J({ ts, request_id: id, model: "claude-opus-5-5", attempt: 1, ttft_ms: 0, total_ms: 1000, stop_reason: "end_turn", usage: { input: 10, output: 10, cache_read: 0, cache_write: 0, cache_write_5m: 0, cache_write_1h: 0 }, context: {} });
+  const sessJ = (id: string, c: string, u: string, cost: number) => J({ id, title: id, model: "anthropic/claude-opus-5-5", created_at: c, updated_at: u, total_input_tokens: 1, total_output_tokens: 1, session_cost: cost, message_count: 2, api_messages: [] });
+  const T = (s: string) => Date.parse(s);
+  beforeAll(() => {
+    sb2 = sandbox();
+    const A = join(sb2.dir, "A"), B = join(sb2.dir, "B");
+    for (const d of [join(A, "cache"), join(A, "sessions"), join(A, "logs"), join(B, "cache"), join(B, "sessions")]) mkdirSync(d, { recursive: true });
+    // host B logs requests all through September; host A only from 09-30
+    writeFileSync(join(B, "cache", "api-log.jsonl"), [req("b1", T("2026-09-01T12:00:00Z")), req("b2", T("2026-09-25T12:00:00Z")), req("b3", T("2026-09-29T12:00:00Z"))].join("\n") + "\n");
+    writeFileSync(join(A, "cache", "api-log.jsonl"), [req("a1", T("2026-09-30T12:00:00Z"))].join("\n") + "\n");
+    writeFileSync(join(A, "logs", "synaps.log.2026-09-25"), "2026-09-25T13:00:00.000000Z DEBUG ThreadId(1) Token Usage: 5 input | 5 output | 0 cache_read | 0 cache_create\n");
+    // gap: A-only, inside B's span, B rows in its window (b2), no A rows → session grain, host A
+    writeFileSync(join(A, "sessions", "gap.json"), sessJ("gap", "2026-09-25T10:00:00Z", "2026-09-25T14:00:00Z", 301));
+    // A-only, A rows in its window → request grain
+    writeFileSync(join(A, "sessions", "late.json"), sessJ("late", "2026-09-30T10:00:00Z", "2026-09-30T14:00:00Z", 5));
+    // identical copies on both, no activity anywhere in the window, same whole-second mtime → unknown
+    for (const R of [A, B]) {
+      const p = join(R, "sessions", "twin.json");
+      writeFileSync(p, sessJ("twin", "2026-08-10T10:00:00Z", "2026-08-10T11:00:00Z", 2)); // before any api-log span
+      utimesSync(p, new Date(T("2026-08-10T11:00:00Z")), new Date(T("2026-08-10T11:00:00Z") + (R === A ? 100 : 700)));
+    }
+    const db = openDb(sb2.db);
+    ingestOnce(db, [resolveRoot("A", A), resolveRoot("B", B)]);
+    q2 = new TelemetryQuery(db);
+  }, 60_000);
+  afterAll(() => sb2.done());
+  const row = (id: string) => q2.db.query("SELECT host, grain, cost FROM sessions WHERE id = ?").get(id) as any;
+
+  test("a session on A only, during B's api-log span, with no A rows in its window, is session grain", () => {
+    expect(row("gap")).toEqual({ host: "A", grain: "session", cost: 301 });
+    expect(row("late")).toMatchObject({ host: "A", grain: "request" });
+    expect(q2.summary({ host: "A" }).all.spend).toBeCloseTo(301 + (q2.db.query("SELECT SUM(cost) c FROM requests WHERE host = 'A'").get() as any).c, 3);
+  });
+
+  test("undecidable origin is 'unknown' (not alphabetical); filters and additivity include it", () => {
+    expect(row("twin")).toEqual({ host: "unknown", grain: "session", cost: 2 });
+    expect(q2.summary({ host: "unknown" }).all).toMatchObject({ spend: 2, sessions: 1, requests: null });
+    const all = q2.summary({}).all;
+    const parts = ["A", "B", "unknown"].map((host) => q2.summary({ host }).all);
+    expect(sum(parts.map((p) => p.spend ?? 0))).toBeCloseTo(all.spend!, 3);
+    expect(sum(parts.map((p) => p.sessions ?? 0))).toBe(all.sessions!);
+    expect(q2.spend({}, "host").series.map((s: any) => s.key).sort()).toEqual(["A", "B", "unknown"]);
+    const u = new URL("http://x/api/telemetry/sessions?host=unknown");
+    expect(handleTelemetry(new Request(u), u, q2)!.status).toBe(200);
+  });
+
+  test("#322-linked rows decide grain directly (sid), even with no unlinked rows in the window", () => {
+    const db = q2.db;
+    db.query(`INSERT INTO requests SELECT 'linked1', host, ts, day, wd, hour, model, attempt, ttft_ms, total_ms, stop, input, output, cache_read, cache_write, cw5m, cw1h, cw_unknown,
+      ctx_messages, ctx_tools, system_bytes, worker, keepwarm, miss_reason, missed_tokens, refusal_retries, cost, saved, saved_net, cost_reported,
+      'gap', turn_id, 'session-1-1', trace_request_id, 1, agent, handle, parent_session, parent_runtime_session_id, 'gap' FROM requests WHERE request_id = 'b1'`).run();
+    rebuildSessions(db);
+    expect(row("gap").grain).toBe("request");
+  });
 });
