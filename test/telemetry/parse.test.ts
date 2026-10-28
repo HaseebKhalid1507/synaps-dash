@@ -95,3 +95,22 @@ test("worker archive head only", () => {
   expect(parseWorkerHead(full.slice(0, full.indexOf(',"history"') + 15))!.agent).toBe("spike");
   expect(modelKey("anthropic/claude-opus-5-5")).toBe("claude-opus-5-5");
 });
+
+test("null, not 0: no TTL split → write TTL unknown; no session_cost → null cost", () => {
+  const r = parseApiLog(lines("jade/cache/api-log.jsonl")[2], "jade")!;
+  expect(r.request_id).toBe("req_fx103");
+  expect([r.cw5m, r.cw1h, r.cw_unknown, r.cache_write]).toEqual([null, null, 1000, 1000]);
+  // billed like pricing.rs calculate_cost: the aggregate at the 5m rate; model prefix stripped
+  expect(r.model).toBe("claude-opus-4-8");
+  expect(r.cost).toBeCloseTo((10 * 5 + 90000 * 0.5 + 1000 * 6.25 + 100 * 25) / 1e6, 12);
+  expect(r.saved_net).toBeCloseTo(r.saved - (1000 * 5 * 0.25) / 1e6, 12);
+  const s = parseSession(readFileSync(join(FIXTURES, "bella/sessions/20260502-100000-ffff.json"), "utf8"))!;
+  expect(s.cost).toBeNull();
+});
+
+test("session header parses from a bounded head; a head without api_messages is not enough", () => {
+  const t = readFileSync(join(FIXTURES, "bella/sessions/20261027-100000-aaaa.json"), "utf8");
+  const cut = t.indexOf(',"api_messages":') + 20;
+  expect(parseSession(t.slice(0, cut))!.id).toBe("20261027-100000-aaaa");
+  expect(parseSession(t.slice(0, 200))).toBeNull();
+});
