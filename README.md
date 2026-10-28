@@ -186,37 +186,45 @@ The bridge also keeps a local telemetry store: what you spent, per day, model, h
 agent; how well the prompt cache held; how fast the provider answered. It's built from the
 logs Synaps already writes. Nothing new gets logged, nothing leaves the machine.
 
-**What it reads (read-only: opened, read, closed; never written, moved, truncated or locked)**
+**What it reads (read-only: opened `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, read, closed; never
+written, moved, truncated or locked; symlinks and FIFOs are skipped, not followed)**
 
 | Source | Gives |
 |---|---|
-| `~/.cache/synaps/api-log.jsonl` (+ `.1`) | one row per provider request: model, tokens, cache TTL split, timings, stop reason, worker/keep-warm flags, cache-miss reason |
-| `~/.cache/synaps/request-trace.jsonl` (+ `.1`) | per-request timings (headers, first model event, stream end), retries, wire size. Joined on the provider request id |
-| `~/.synaps-cli/sessions/*.json` | session headers: title, model, totals, `session_cost`. Only the part before `api_messages` is parsed, plus a scan for subagent `archive_path`s (that's how workers link to their parent). Files that aren't sessions are skipped and counted |
+| `~/.cache/synaps/api-log.jsonl` (+ `.1 … .N`) | one row per provider request: model, tokens, cache TTL split, timings, stop reason, worker/keep-warm flags, cache-miss reason; with SynapsCLI #322 also the session id, worker agent/handle and `cost_usd` |
+| `~/.cache/synaps/request-trace.jsonl` (+ `.1 … .N`) | per-request timings (headers, first model event, stream end), retries, wire size. Joined on the provider request id |
+| `sessions/*.json` | session headers: title, model, totals, `session_cost`. Only a bounded head is parsed (everything before `api_messages`); subagent `archive_path`s are found by a chunked scan (that's how workers link to their parent). Files that aren't sessions are skipped and counted |
 | `~/.synaps-cli/subagent-history/*/sa_N.json` | worker runs: agent name, model, status (head of the file only) |
-| `~/.synaps-cli/synaps.log.*` | legacy `Token Usage:` lines, for cache hit % before the api-log existed |
+| `synaps.log.*` | legacy `Token Usage:` lines, for cache hit % where the api-log didn't exist yet |
 
 Request-level spend comes from the api-log, priced with a port of SynapsCLI's
 `pricing.rs` (`telemetry/pricing.ts`: API list price, labelled "API-equivalent" in the UI).
-For days before the api-log existed, spend falls back to each session's `session_cost`, and
-`/api/telemetry/spend` marks where that switch happens (`grain`). Days are local
-(America/New_York).
+A session's own `session_cost` is used only when no api-log row (on any host) falls inside
+it, so nothing is counted twice and the per-host numbers add up to the total. Sessions copied
+between machines are labelled with the machine they ran on. Compaction calls never reach the
+api-log, so request-level spend runs a little under `session_cost` (about 15% lately).
+Days are local (America/New_York).
 
-Ingest runs every 5 s in a worker thread, so the bridge never waits on it. Each log is
-tailed from a saved byte offset per (file, inode). Synaps rotates by rename, so a
-rotated `.1` is finished from where it left off and the fresh file read from 0. A truncated
-or replaced file restarts, and every insert is idempotent. Session and worker files are
-re-read only when their mtime or size changes. A full backfill of two hosts (88K requests,
-1.1K sessions, 1.4K workers, 315K legacy lines) takes about 3–6 s. Errors are counted in
-`/api/telemetry/health` and never take the extension down.
+Ingest runs every 5 s in a worker thread, so the bridge never waits on it, and a watchdog
+replaces the worker if it goes quiet. Each log is tailed from a saved byte offset per (file,
+inode). Synaps rotates by rename, so a rotated generation is finished from where it left
+off and the fresh file read from 0. A truncated or replaced file restarts, a vanished
+generation's unread bytes are counted (`lost_bytes`), and every insert is idempotent. The
+worker keeps daily rollups, so the endpoints read a row per day, not a row per request: all
+of them answer in under ~15 ms on today's two hosts. A full backfill of two hosts (89K
+requests, 1.1K sessions, 1.4K workers, 316K legacy lines) takes about 5–8 s and peaks around
+130 MB. Errors are counted in `/api/telemetry/health` and never take the extension down.
+
+The store holds titles, costs and paths, so it's owner-only: the directory is `0700` and the
+database (with its `-wal`/`-shm`) `0600`.
 
 **Config** (plugin config, e.g. `extension.synaps-dash.telemetry_host = bella`):
 
 | Key | Default | |
 |---|---|---|
-| `telemetry` | `on` | `off` disables the store, the ingest and `/api/telemetry/*` (503) |
-| `telemetry_db` | `~/.local/share/synaps-telemetry/telemetry.db` | SQLite (WAL); safe to delete, it rebuilds |
-| `telemetry_host` | short hostname | label for this machine's rows (`host=` in the API) |
+| `telemetry` | `on` for the default daemon, `off` for a profile daemon | `off` disables the store, the ingest and `/api/telemetry/*` (503). A profile daemon (`--profile webproto`, the sandbox) only runs telemetry with `telemetry = on`, and then reads its own `<base>/<profile>/sessions` into its own DB |
+| `telemetry_db` | `~/.local/share/synaps-telemetry/telemetry.db` (`telemetry-<profile>.db` for a profile) | SQLite (WAL); safe to delete, it rebuilds |
+| `telemetry_host` | short hostname | label for this machine's rows (`host=` in the API). Delete the DB after changing it |
 | `telemetry_sources` | (none) | extra read-only roots, `host=path,…`: a home dir or a snapshot dir laid out as `cache/ sessions/ subagent-history/ logs/` |
 
 Endpoints (`/api/telemetry/summary|spend|agents|cache|latency|sessions|session/:id|heatmap|health`)
@@ -227,7 +235,7 @@ sit behind the same token cookie as everything else; the shapes are in
 bun telemetry/cli.ts backfill --db /tmp/t.db --src bella=$HOME --src jade=/path/to/jade-snapshot
 bun telemetry/cli.ts stats --db /tmp/t.db
 bun telemetry/cli.ts query --db /tmp/t.db '/api/telemetry/summary?host=bella'
-bun test   # parsers, rotation/offsets/idempotency, pricing, every endpoint's shape (temp dirs in /tmp)
+bun test   # parsers, rotation/offsets, grain/additivity, DST, pricing (all of pricing.rs's tests), endpoints, perf guard
 ```
 
 ## Development

@@ -19,10 +19,12 @@ the machine's TZ) as `YYYY-MM-DD` strings. Any metric with no data is `null`, ne
   "all":   { "spend": 53679.0, "requests": 87994, "sessions": 1138,
              "first_ts": 1775800000000, "last_ts": 1793163608349,
              "tokens": { "input": 0, "output": 0, "cache_read": 0, "cache_write": 0 },
-             "saved_by_cache": 412000.0 } }
+             "saved_by_cache": 412000.0, "saved_by_cache_net": 396000.0 } }
 ```
 `live_*`: from the daemon session list if the extension has it, else `null`.
-`saved_by_cache` = cost if every cache_read token had been billed as fresh input minus actual.
+`saved_by_cache` (gross) = cost if every cache_read token had been billed as fresh input minus actual.
+`saved_by_cache_net` = gross minus the write premium caching costs over plain input
+(5m writes +0.25×, 1h writes +1×, TTL-unknown writes as 5m). Label gross as gross in the UI.
 
 ## GET /api/telemetry/spend?bucket=day&group=model|role|host
 ```json
@@ -90,53 +92,90 @@ or session_id once the Synaps telemetry PR lands); otherwise `timeline: []`.
 
 ## GET /api/telemetry/health
 ```json
-{ "stops": [ { "stop": "refusal", "count": 92 } ],
+{ "stops": [ { "stop": "refusal", "count": 92 }, { "stop": null, "count": 703 } ],
   "refusal_retries": 67, "translation_losses": 0, "tools_changed_misses": 23,
   "ingest": { "last_run": 0, "rows": { "requests": 0, "traces": 0, "sessions": 0, "workers": 0, "legacy": 0 },
               "errors": 0, "skipped_files": 158, "sources": [ { "host": "bella", "path": "…", "offset": 0 } ] } }
 ```
 
-## Store v1 notes (feat/telemetry-store), all additive, no shape above changed
+## Store notes (feat/telemetry-store, v2 after review). Additive only: no shape above changed
 
 Errors: `400 {"error"}` bad param, `404 {"error"}` unknown session/path, `405` non-GET,
-`503 {"error"}` telemetry disabled/starting, `500 {"error"}` query failure.
+`503 {"error"}` telemetry disabled/starting, `500 {"error":"telemetry query failed"}` (details
+go to the extension log only).
 
-- **Cutover / grain.** Request-level data starts at the first api-log row *in the host scope*
-  (all hosts: jade 2026-06-12; `host=bella`: 2026-09-20). Sessions created before that are
-  accounted at session grain (their `session_cost`, on their `created` local day, role `main`);
-  later sessions are covered by api-log rows. `summary.all.spend/tokens/saved_by_cache` and
-  `spend` use that split. So `all.spend` is **not** the raw Σ session_cost (~$53.7K): today
-  it is ≈ $47.3K, because the api-log sums lower than session_cost after the cutover (jade
-  never logged worker requests to api-log, and some sessions weren't api-logged).
+- **Grain, one decision per session.** A session's `session_cost` counts (session grain) only
+  when **no request row on any host** overlaps its `[created, updated]`; otherwise its spend
+  is request-level (api-log rows) and the session is `grain: "request"` (this includes sessions
+  straddling a host's api-log start). The decision doesn't depend on the `host` filter, so
+  **per-host values add up to the all-hosts value** (spend, requests, sessions, tokens, saved).
+  Session-grain spend lands on the session's `created` local day, role `main`.
+- **Session host = origin host**, not the newest copy: among hosts holding a copy, (1) the host
+  whose api-log span covers `created`; else (2) the host with the most api-log rows +
+  `Token Usage:` lines inside the session's window; else (3) the earliest copy (oldest
+  `updated`, then file mtime at 1 s). Title/totals/cost come from the newest copy.
+- **Compaction is not in the api-log** (before or after SynapsCLI #322): compaction calls send the
+  whole transcript and are billed into `session_cost`, but write no api-log record. Request-grain
+  spend therefore always undercounts `session_cost`. On bella since 2026-10-01 (all workers
+  api-logged by then): main-role api-log spend $3.06K vs Σ session_cost of sessions created since
+  $3.58K (+$0.76K for 2 sessions spanning the date) → at least ≈ $0.52K (≈ 15%) of main-session
+  spend never reaches the api-log, compaction being the known contributor.
+- **api-log fields read (SynapsCLI #322).** `session_id` = persisted conversation id (the
+  `sessions/<id>.json` id) → links rows to sessions; worker rows have no `session_id` but
+  `parent_session_id`, so they link to the parent. `worker_agent` / `worker_handle` → agent and
+  per-worker spend. `runtime_session_id` / `trace_request_id` = the trace's `session_id` /
+  `request_id`; `turn_id` is per *request* (`turn-<pid>-<n>`), not per user turn. `cost_usd` is
+  stored beside our own `pricing.ts` cost (we report ours). Rotated generations `X.1 … X.N`
+  (`telemetry_log_generations`) are all read, oldest first.
+- `summary.all.spend` = request rows + session-grain sessions. With today's data: all ≈ $49.2K,
+  bella ≈ $7.9K, jade ≈ $41.3K (they add up). Σ session_cost ≈ $53.7K = session-grain $24.3K +
+  request-grain sessions $29.4K; api-log rows for the request-grain period sum to $24.9K, so
+  the api-log under-counts those sessions by ≈ $4.5K (jade never api-logged worker requests).
 - `summary.now.burn_rate_per_hour` = spend in the trailing 60 min. `live_sessions` /
-  `live_workers` are `null` for now (the extension doesn't hold the daemon session list).
-- `spend`: only `bucket=day`. Range = first..last data day, widened to `from`/`to` if given.
+  `live_workers` are `null` (the extension doesn't hold the daemon session list).
+- `spend`: only `bucket=day`. Range = first..last data day, widened to `from`/`to`.
+  `grain` = first session-grain day, first request day.
+- Model keys are normalized: provider prefix (`anthropic/`) and snapshot date suffix
+  (`-20251001`, `@20250805`) are dropped, so they group together; cost is unaffected.
 - `agents`: `runs` = worker archives per `meta.agent_name` (bella only; the jade snapshot has
-  no subagent-history). `requests`/`spend` are `null` until api-log rows carry worker identity
-  (the Synaps telemetry PR); nothing on disk links a worker's requests to its agent today.
-- `cache.daily[]` rows get `"grain": "request" | "legacy"`. Legacy rows (days before the
-  cutover, from `synaps.log.*` `Token Usage:` lines) have `write_5m: null`, `write_1h: null`
-  and an extra `write` (the un-split cache_create total).
+  no subagent-history). `requests`/`spend` stay `null` until api-log rows carry worker identity.
+- `cache.daily[]` adds `grain` (`"request" | "legacy" | "mixed"`), `write_unknown` (writes with no
+  TTL split: legacy lines and api-log rows without `cache_write_5m/1h`; `null` when none) and
+  `write` (all writes). `write_5m`/`write_1h` are `null` on days with no TTL-split data. A legacy
+  `Token Usage:` line counts only on a day when **its own host** has no api-log rows (otherwise
+  it's the same request again: verified 5,860/5,860 line-for-line on bella 2026-10-26), so
+  bella's legacy days before its api-log and in its api-log gap (09-21..09-29) are included.
+  Very low legacy hit % days (e.g. 1.7% on 05-29) are real: a handful of cold-cache requests
+  (writes dominate); the parser's field mapping and duplicate handling were checked.
+- `cache.releases`: minor releases only (`vX.Y.0`), inside `from`/`to`. Read by the ingest worker
+  (git, async), served from the store.
 - `cache.keepwarm.est_saved` = Σ over pings of cache_read × input price × (1.25 − read
-  multiplier): the 5m rewrite the next turn would have paid without the ping. Gross, not net
-  of `cost`. `cost`/`est_saved` are `null` when there were no pings.
-- `latency`: api-log `ttft_ms` < 50 ms is treated as null too (the bug yields 0 in ~99%, and
-  1–40 ms in the rest). TTFT = trace `first_model_event_ms` where joined, else api-log
-  `ttft_ms`. `split.stream_p50` = `stream_end_ms − first_model_event_ms`. `retries` counts
-  requests with api-log `attempt > 1` or trace `retries[]` non-empty. `by_context` x = prompt
-  tokens (input + cache_read + cache_write), evenly strided over time.
-- `sessions`: `from`/`to` select sessions *overlapping* the range. `spend` = the session
-  file's `session_cost`. `hit_pct` from the session's own totals (`null` for old files without
-  cache totals). `requests` / `peak_context_tokens` are `null` unless api-log rows link to the
-  session (forward-compat `session_id` / worker `parent_session_id`). The trace `session_id`
-  is a runtime id (`session-<pid>-<ms>`), not a session-file id, so the trace join can't link.
-  `workers` = subagent archives referenced by the session's `archive_path` tool results.
+  multiplier): the 5m rewrite the next turn would have paid. Gross, not net of `cost`.
+- `latency`, two generations of api-log timing:
+  - **old rows** (no `runtime_session_id`): `ttft_ms` < 50 ms is treated as null (the bug yields
+    0 in ~99%, 1–40 ms otherwise), and `total_ms` was measured from the *response headers*;
+  - **SynapsCLI #322 rows** (have `runtime_session_id`): `ttft_ms`/`total_ms` are measured from
+    the *send* (the trace's clock) and trusted as-is; 0 or absent = no model event (null).
+  So `total_p50/p95` read higher from the day #322 lands — a measurement change, not a slowdown.
+  TTFT = trace `first_model_event_ms` where joined, else api-log `ttft_ms`.
+  Daily percentiles come from log-bucketed histograms (exact < 100 ms, then 2% buckets: within
+  ±1%). `split.stream_p50` = `stream_end_ms − first_model_event_ms`. `retries` counts requests
+  with `attempt > 1` or a non-empty trace `retries[]`. `by_context` x = prompt tokens
+  (input + cache_read + cache_write), a rowid-strided sample (≤ 2000).
+- `sessions`: `from`/`to` select sessions *overlapping* the range. Rows add `grain` and
+  `title_raw`; `title` has leading `↳` chain markers stripped. `spend` = the session's
+  `session_cost` (`null` when the file has none). `hit_pct` from the session's own totals
+  (`null` for old files without cache totals). `requests` / `peak_context_tokens` are `null`
+  unless api-log rows link to the session (forward-compat `session_id` / worker
+  `parent_session_id`); the trace `session_id` is a runtime id, so the trace join can't link.
+  `workers` = distinct subagent archives referenced by `archive_path` tool results.
 - `session/:id` `timeline` follows the same linkage (`[]` until session_id lands);
   `workers[].spend` is `null` until requests carry the worker handle.
-- `health.translation_losses` counts loss entries whose `action` isn't `"synthesized"` (every
-  trace synthesizes a system segment; that's not a loss). `stops[].stop` is `"none"` for rows
-  without a stop_reason. `ingest` adds `last_run_ms`, `bad_lines` (malformed source lines),
-  `last_error`. `sources[]` adds `kind` and `size`; `synaps.log.*` files are folded into one
-  entry per host (`path` ends `synaps.log.*`, `offset`/`size` summed, `files`).
-- Host label of the local machine = plugin config `telemetry_host` (default: short hostname,
-  `parabellum` on bella). Set `extension.synaps-dash.telemetry_host = bella`.
+- `health.stops[].stop` is `null` for rows without a stop_reason. `translation_losses` counts loss
+  entries whose `action` isn't `"synthesized"`. `ingest` adds `last_run_ms`, `bad_lines`,
+  `lost_bytes` (a lower bound on log bytes that rotated away unread), `last_error`;
+  `skipped_files` includes symlinks/FIFOs (never followed). `sources[]` adds `kind`, `size`;
+  `synaps.log.*` files fold into one entry per host (`path` ends `synaps.log.*`, `files`).
+- Local host label = plugin config `telemetry_host` (default: short hostname, `parabellum` on
+  bella): set `extension.synaps-dash.telemetry_host = bella`. Profile daemons have telemetry off
+  unless `telemetry = on`, and then use `telemetry-<profile>.db`.
