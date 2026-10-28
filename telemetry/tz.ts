@@ -37,3 +37,24 @@ export function daysBetween(a: string, b: string): string[] {
   }
   return out;
 }
+
+const addDays = (day: string, n: number) => {
+  const [y, m, d] = day.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
+};
+export const nextDay = (day: string) => addDays(day, 1);
+export const prevDay = (day: string) => addDays(day, -1);
+
+/** Unix ms of local midnight starting `day`. NY midnight is 04:00Z or 05:00Z, always on a UTC hour. */
+export function dayStartMs(day: string): number {
+  const [y, m, d] = day.split("-").map(Number);
+  const base = Date.UTC(y, m - 1, d);
+  for (let h = 2; h <= 7; h++) if (local(base + h * 3_600_000).day === day) return base + h * 3_600_000;
+  throw new Error(`no local midnight for ${day}`);
+}
+
+/** Monday = 0 … Sunday = 6, from a YYYY-MM-DD calendar day. */
+export function weekdayOf(day: string): number {
+  const [y, m, d] = day.split("-").map(Number);
+  return (new Date(Date.UTC(y, m - 1, d)).getUTCDay() + 6) % 7;
+}

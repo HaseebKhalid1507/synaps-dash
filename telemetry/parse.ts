@@ -1,25 +1,37 @@
 // Pure parsers: one source record in, one row out (or null). No I/O here.
 
-import { costOptionalSplit, cacheSavings } from "./pricing.ts";
+import { costOptionalSplit, cacheSavings, cacheNetSavings } from "./pricing.ts";
 import { local } from "./tz.ts";
 
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 const optNum = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
 
-/** "anthropic/claude-opus-5-5" → "claude-opus-5-5" (display/group key). */
-export const modelKey = (m: string | null | undefined): string => (m ? m.replace(/^[^/]+\//, "") : "unknown");
+/** Display/group key: provider prefix and snapshot date dropped, so "anthropic/claude-haiku-4-5",
+ *  "claude-haiku-4-5" and "claude-haiku-4-5-20251001" are one model. Pricing treats them alike
+ *  (pricing.rs strips the same suffixes). */
+export const modelKey = (m: string | null | undefined): string =>
+  m ? m.replace(/^[^/]+\//, "").replace(/(?:[-@]\d{8})(?:-v\d+:\d+)?$/, "") || m : "unknown";
+
+/** Resumed/compacted chains prefix titles with "↳ ↳ ↳ "; the store keeps the clean title. */
+export const cleanTitle = (t: string | null): string | null => {
+  if (t === null) return null;
+  const c = t.replace(/^[\s↳]+/u, "");
+  return c || t;
+};
 
 export const TTFT_FLOOR_MS = 50;
 
 export type RequestRow = {
   request_id: string; host: string; ts: number; day: string; wd: number; hour: number;
   model: string; attempt: number; ttft_ms: number | null; total_ms: number | null; stop: string | null;
-  input: number; output: number; cache_read: number; cache_write: number; cw5m: number; cw1h: number;
+  // cw5m/cw1h: null when the record has no TTL split (then the aggregate is in cw_unknown)
+  input: number; output: number; cache_read: number; cache_write: number; cw5m: number | null; cw1h: number | null; cw_unknown: number;
   ctx_messages: number | null; ctx_tools: number | null; system_bytes: number | null;
   worker: number; keepwarm: number; miss_reason: string | null; missed_tokens: number | null; refusal_retries: number;
-  cost: number; saved: number; cost_reported: number | null;
-  session_id: string | null; turn_id: string | null; agent: string | null; handle: string | null; parent_session: string | null; sid: string | null;
+  cost: number; saved: number; saved_net: number; cost_reported: number | null;
+  session_id: string | null; turn_id: string | null; runtime_session_id: string | null; trace_request_id: string | null; timing_v2: number;
+  agent: string | null; handle: string | null; parent_session: string | null; parent_runtime_session_id: string | null; sid: string | null;
 };
 
 /** Concurrent appenders occasionally glue two records onto one line
@@ -62,35 +74,50 @@ export function parseApiLog(line: string | object, host: string): RequestRow | n
   const input = num(u.input), output = num(u.output), cr = num(u.cache_read), cw = num(u.cache_write);
   const c5 = optNum(u.cache_write_5m), c1 = optNum(u.cache_write_1h);
   const model = modelKey(str(d.model));
-  // Bill exactly like pricing.rs: known TTL buckets kept, remainder at 1h.
-  const cw5 = c5 ?? (c1 === null ? cw : 0);
-  const cw1 = (c1 ?? 0) + (c5 !== null || c1 !== null ? Math.max(0, cw - ((c5 ?? 0) + (c1 ?? 0))) : 0);
+  // TTL split as pricing.rs bills it: known buckets kept, any remainder at 1h. No split at
+  // all → TTL unknown (billed at 5m, like calculate_cost), recorded as unknown, not as 5m.
+  const split = c5 !== null || c1 !== null;
+  const cw5 = split ? (c5 ?? 0) : null;
+  const cw1 = split ? (c1 ?? 0) + Math.max(0, cw - ((c5 ?? 0) + (c1 ?? 0))) : null;
+  const cwu = split ? 0 : cw;
   const w = d.worker;
   const wobj = w && typeof w === "object" ? w : {};
   const isWorker = w === true || (w && typeof w === "object") || !!str(d.parent_session_id) ? 1 : 0;
   const session_id = str(d.session_id);
-  const parent = str(wobj.parent_session_id) ?? str(wobj.parent) ?? str(d.parent_session_id);
+  const parent = str(d.parent_session_id) ?? str(wobj.parent_session_id) ?? str(wobj.parent);
+  const runtime = str(d.runtime_session_id);
   const L = local(ts);
   const ttft = optNum(d.ttft_ms);
+  // SynapsCLI #322 marks its fixed records with runtime_session_id: ttft_ms/total_ms are then
+  // measured from the send (same clock as the trace) and trusted as-is (0/absent = no event).
+  // Older rows: ttft_ms is broken upstream (0 in ~99%, the rest 1–40 ms; no real TTFT is that
+  // fast), so below TTFT_FLOOR_MS → null and the trace join fills TTFT in. Their total_ms was
+  // measured from the response headers, not the send, so it reads lower than new rows'.
+  const fixedClock = runtime !== null;
   return {
     request_id: rid, host, ts, day: L.day, wd: L.wd, hour: L.hour,
     model, attempt: num(d.attempt) || 1,
     // api-log ttft_ms is broken upstream: 0 in ~99% of rows, and the rest are 1–40 ms
     // (no real TTFT is that fast). Below TTFT_FLOOR_MS → null; the trace join fills TTFT in.
-    ttft_ms: ttft !== null && ttft >= TTFT_FLOOR_MS ? ttft : null,
+    ttft_ms: ttft === null || ttft <= 0 ? null : fixedClock || ttft >= TTFT_FLOOR_MS ? ttft : null,
+    timing_v2: fixedClock ? 1 : 0,
     total_ms: optNum(d.total_ms), stop: str(d.stop_reason),
-    input, output, cache_read: cr, cache_write: cw, cw5m: cw5, cw1h: cw1,
+    input, output, cache_read: cr, cache_write: cw, cw5m: cw5, cw1h: cw1, cw_unknown: cwu,
     ctx_messages: optNum(d.context?.messages), ctx_tools: optNum(d.context?.tools), system_bytes: optNum(d.context?.system_bytes),
     worker: isWorker, keepwarm: d.keepwarm === true ? 1 : 0,
     miss_reason: str(d.cache_diag?.miss_reason), missed_tokens: optNum(d.cache_diag?.missed_tokens),
     refusal_retries: num(d.refusal_retries_used),
     cost: costOptionalSplit(model, input, output, cr, cw, c5, c1),
-    saved: cacheSavings(model, input, cr, cw5, cw1),
+    saved: cacheSavings(model, input, cr, cw5 ?? cwu, cw1 ?? 0),
+    saved_net: cacheNetSavings(model, input, cr, cw5 ?? cwu, cw1 ?? 0),
     cost_reported: optNum(d.cost_usd),
-    session_id, turn_id: str(d.turn_id),
-    agent: str(wobj.agent_name) ?? str(wobj.agent) ?? str(wobj.name) ?? str(d.agent_name),
-    handle: str(wobj.handle_id) ?? str(wobj.handle) ?? str(d.handle_id),
-    parent_session: parent,
+    // #322 field names first (flat worker_agent / worker_handle), older guesses as fallbacks.
+    // session_id = the persisted conversation id (sessions/<id>.json); workers carry
+    // parent_session_id instead. turn_id is per request (turn-<pid>-<n>), not per user turn.
+    session_id, turn_id: str(d.turn_id), runtime_session_id: runtime, trace_request_id: str(d.trace_request_id),
+    agent: str(d.worker_agent) ?? str(wobj.agent_name) ?? str(wobj.agent) ?? str(wobj.name) ?? str(d.agent_name),
+    handle: str(d.worker_handle) ?? str(wobj.handle_id) ?? str(wobj.handle) ?? str(d.handle_id),
+    parent_session: parent, parent_runtime_session_id: str(d.parent_runtime_session_id),
     sid: parent ?? session_id,
   };
 }
@@ -138,8 +165,8 @@ export function parseLegacy(line: string): LegacyRow | null {
 }
 
 export type SessionRow = {
-  id: string; title: string | null; model: string; created: number; updated: number;
-  input: number; output: number; cache_read: number | null; cache_write: number | null; cost: number; message_count: number | null;
+  id: string; title: string | null; title_raw: string | null; model: string; created: number; updated: number;
+  input: number; output: number; cache_read: number | null; cache_write: number | null; cost: number | null; message_count: number | null;
 };
 
 /** Header-only parse when possible: everything before "api_messages" (a raw,
@@ -153,10 +180,10 @@ export function parseSession(text: string): SessionRow | null {
   const created = Date.parse(d.created_at), updated = Date.parse(d.updated_at ?? d.created_at);
   if (!Number.isFinite(created)) return null;
   return {
-    id: d.id, title: str(d.title) ?? str(d.name), model: modelKey(str(d.model)), created, updated: Number.isFinite(updated) ? updated : created,
+    id: d.id, title: cleanTitle(str(d.title) ?? str(d.name)), title_raw: str(d.title) ?? str(d.name), model: modelKey(str(d.model)), created, updated: Number.isFinite(updated) ? updated : created,
     input: num(d.total_input_tokens), output: num(d.total_output_tokens),
     // older session files predate the cache totals: unknown, not zero
-    cache_read: optNum(d.total_cache_read_tokens), cache_write: optNum(d.total_cache_creation_tokens), cost: num(d.session_cost), message_count: optNum(d.message_count),
+    cache_read: optNum(d.total_cache_read_tokens), cache_write: optNum(d.total_cache_creation_tokens), cost: optNum(d.session_cost), message_count: optNum(d.message_count), // missing cost = unknown (null), not $0
   };
 }
 
