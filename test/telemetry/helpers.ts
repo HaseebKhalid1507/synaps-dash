@@ -1,8 +1,17 @@
+import { setDefaultTimeout } from "bun:test";
 import { mkdtempSync, cpSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 export const FIXTURES = join(import.meta.dir, "fixtures");
+
+/** Strict timing bounds only with PERF=1 (a quiet machine); the default bounds survive a
+ *  saturated one (e.g. 24 CPU hogs on 24 cores) and still catch real regressions. */
+export const PERF = process.env.PERF === "1";
+// Generous default per-test timeout: on a saturated machine (IO + CPU) even fixture-sized
+// ingests have been seen taking ~10 s. Correctness asserts are unchanged.
+setDefaultTimeout(PERF ? 5_000 : 120_000);
+export const SLOW = 180_000; // per-test timeout for anything that spawns processes/workers
 
 /** Fresh copy of the fixture roots + a db path, all under /tmp. */
 export function sandbox(): { dir: string; db: string; bella: string; jade: string; done(): void } {

@@ -189,7 +189,7 @@ test("chunk boundaries: any chunk size (incl. lines longer than a chunk) yields 
     expect(st.bad_lines).toBe(2);
     expect(dump(db)).toBe(dump(ref));
   }
-});
+}, 60_000);
 
 test("archive_path scan across chunk edges finds every reference once", () => {
   sb = sandbox();

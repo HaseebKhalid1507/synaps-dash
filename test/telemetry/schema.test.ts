@@ -60,4 +60,4 @@ test("two processes cold-opening the same DB both migrate cleanly (BEGIN IMMEDIA
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-}, 30_000);
+}, 180_000);

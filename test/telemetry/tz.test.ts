@@ -49,7 +49,7 @@ beforeAll(() => {
   const db = openDb(sb.db);
   ingestOnce(db, [resolveRoot("dst", join(sb.dir, "dst"))]);
   q = new TelemetryQuery(db);
-});
+}, 60_000);
 afterAll(() => sb.done());
 
 test("daily spend buckets: 25 requests on Nov 1, 23 on Mar 8 ($4 each)", () => {

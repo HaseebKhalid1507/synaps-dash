@@ -30,7 +30,7 @@ beforeAll(() => {
   const db = openDb(sb.db);
   ingestOnce(db, [resolveRoot("bella", root)]);
   q = new TelemetryQuery(db);
-});
+}, 60_000);
 afterAll(() => sb.done());
 
 test("#322 fields parse: persisted vs runtime ids, flat worker identity, cost_usd kept beside ours", () => {

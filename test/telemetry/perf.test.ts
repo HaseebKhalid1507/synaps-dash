@@ -6,7 +6,7 @@ import { openDb } from "../../telemetry/schema.ts";
 import { ingestOnce, resolveRoot } from "../../telemetry/ingest.ts";
 import { TelemetryQuery } from "../../telemetry/query.ts";
 import { handleTelemetry } from "../../telemetry/http.ts";
-import { sandbox, synthRoot } from "./helpers.ts";
+import { sandbox, synthRoot, PERF, SLOW } from "./helpers.ts";
 
 let sb: ReturnType<typeof sandbox>;
 let q: TelemetryQuery;
@@ -15,10 +15,10 @@ beforeAll(() => {
   const db = openDb(sb.db);
   ingestOnce(db, [resolveRoot("syn", synthRoot(join(sb.dir, "syn"), 200_000, 365))]);
   q = new TelemetryQuery(db);
-}, 120_000);
+}, 600_000);
 afterAll(() => sb.done());
 
-const BOUND_MS = 60;
+const BOUND_MS = PERF ? 60 : 1000; // the default still fails a per-row (O(requests)) regression on 200K rows
 const time = (path: string) => {
   const ts: number[] = [];
   for (let i = 0; i < 5; i++) {
@@ -39,4 +39,4 @@ for (const p of ["/api/telemetry/latency", "/api/telemetry/health", "/api/teleme
   `/api/telemetry/latency?from=${Date.parse("2026-06-01T13:17:00Z")}&to=${Date.parse("2026-09-15T02:00:00Z")}`])
   test(`${p.replace(/\?.*/, (m) => m.slice(0, 30))} < ${BOUND_MS} ms (median of 5)`, () => {
     expect(time(p)).toBeLessThan(BOUND_MS);
-  });
+  }, SLOW);
