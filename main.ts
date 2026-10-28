@@ -552,6 +552,8 @@ const STATIC: Record<string, string> = {
   "/index.html": "index.html",
   "/app.js": "app.js",
   "/style.css": "style.css",
+  "/telemetry.js": "telemetry.js",
+  "/telemetry.css": "telemetry.css",
   "/fonts/InterVariable.woff2": "fonts/InterVariable.woff2",
 };
 const MIME: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8", woff2: "font/woff2" };
