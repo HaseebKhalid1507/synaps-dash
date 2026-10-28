@@ -199,9 +199,10 @@ written, moved, truncated or locked; symlinks and FIFOs are skipped, not followe
 
 Request-level spend comes from the api-log, priced with a port of SynapsCLI's
 `pricing.rs` (`telemetry/pricing.ts`: API list price, labelled "API-equivalent" in the UI).
-A session's own `session_cost` is used only when no api-log row (on any host) falls inside
-it, so nothing is counted twice and the per-host numbers add up to the total. Sessions copied
-between machines are labelled with the machine they ran on. Compaction calls never reach the
+Each session is labelled with the machine it ran on (copies between machines don't move it;
+`unknown` when identical copies leave no way to tell), and its own `session_cost` is used
+only when that machine logged no api-log rows for it, so nothing is counted twice and the
+per-host numbers add up to the total. Compaction calls never reach the
 api-log, so request-level spend runs a little under `session_cost` (about 15% lately).
 Days are local (America/New_York).
 

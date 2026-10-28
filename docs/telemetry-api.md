@@ -7,7 +7,8 @@ token cookie (`tokenOk`), same as `/api/models`. All money is USD at API list pr
 (estimate, see pricing.ts) — the UI labels it "API-equivalent".
 
 Common query params: `from`, `to` (unix ms, optional; default = all time),
-`host` (`bella`|`jade`|omitted = all). Day buckets are LOCAL days (America/New_York,
+`host` (`bella`|`jade`|`unknown`|omitted = all; `unknown` = sessions whose origin machine can't be
+told apart, see the store notes). Day buckets are LOCAL days (America/New_York,
 the machine's TZ) as `YYYY-MM-DD` strings. Any metric with no data is `null`, never 0.
 
 ## GET /api/telemetry/summary
@@ -104,16 +105,20 @@ Errors: `400 {"error"}` bad param, `404 {"error"}` unknown session/path, `405` n
 `503 {"error"}` telemetry disabled/starting, `500 {"error":"telemetry query failed"}` (details
 go to the extension log only).
 
-- **Grain, one decision per session.** A session's `session_cost` counts (session grain) only
-  when **no request row on any host** overlaps its `[created, updated]`; otherwise its spend
-  is request-level (api-log rows) and the session is `grain: "request"` (this includes sessions
-  straddling a host's api-log start). The decision doesn't depend on the `host` filter, so
-  **per-host values add up to the all-hosts value** (spend, requests, sessions, tokens, saved).
-  Session-grain spend lands on the session's `created` local day, role `main`.
-- **Session host = origin host**, not the newest copy: among hosts holding a copy, (1) the host
-  whose api-log span covers `created`; else (2) the host with the most api-log rows +
-  `Token Usage:` lines inside the session's window; else (3) the earliest copy (oldest
-  `updated`, then file mtime at 1 s). Title/totals/cost come from the newest copy.
+- **Session host = origin host**, decided first, not the newest copy: among hosts holding a
+  copy, (1) the host whose api-log span covers `created`; else (2) the host with the most
+  api-log rows + `Token Usage:` lines inside the session's window; else (3) the earliest copy
+  (oldest `updated`, then file mtime at 1 s). If nothing decides (identical copies, no activity
+  anywhere) the host is **`"unknown"`**, never a coin flip. `unknown` is a host value like any
+  other: `host=unknown` filters to it and it appears as a `spend?group=host` series.
+  Title/totals/cost come from the newest copy.
+- **Grain, one decision per session.** The session is `grain: "request"` (its `session_cost` is
+  not added; its spend is in api-log rows) when (a) api-log rows link to it (#322 `session_id`,
+  or `parent_session_id` for its workers), or (b) unlinked (pre-#322) api-log rows **on its
+  origin host** fall inside `[created, updated]` (origin `unknown`: on any host holding a copy).
+  Otherwise it's `grain: "session"` and its `session_cost` counts, on its `created` local day,
+  role `main`. Another host's rows never cover a session. The decision doesn't depend on the
+  `host` filter, so **per-host values (including `unknown`) add up to the all-hosts value**.
 - **Compaction is not in the api-log** (before or after SynapsCLI #322): compaction calls send the
   whole transcript and are billed into `session_cost`, but write no api-log record. Request-grain
   spend therefore always undercounts `session_cost`. On bella since 2026-10-01 (all workers
@@ -127,10 +132,11 @@ go to the extension log only).
   `request_id`; `turn_id` is per *request* (`turn-<pid>-<n>`), not per user turn. `cost_usd` is
   stored beside our own `pricing.ts` cost (we report ours). Rotated generations `X.1 … X.N`
   (`telemetry_log_generations`) are all read, oldest first.
-- `summary.all.spend` = request rows + session-grain sessions. With today's data: all ≈ $49.2K,
-  bella ≈ $7.9K, jade ≈ $41.3K (they add up). Σ session_cost ≈ $53.7K = session-grain $24.3K +
-  request-grain sessions $29.4K; api-log rows for the request-grain period sum to $24.9K, so
-  the api-log under-counts those sessions by ≈ $4.5K (jade never api-logged worker requests).
+- `summary.all.spend` = request rows + session-grain sessions. With today's data: all ≈ $50.1K
+  = bella $6.8K + jade $41.3K + unknown $2.0K (they add up). Σ session_cost ≈ $53.7K =
+  session-grain $25.2K + request-grain sessions $28.5K; the api-log rows sum to $24.9K, so the
+  api-log under-counts the request-grain sessions by ≈ $3.6K (≈ 13%): compaction (below) and
+  jade's never-api-logged worker requests.
 - `summary.now.burn_rate_per_hour` = spend in the trailing 60 min. `live_sessions` /
   `live_workers` are `null` (the extension doesn't hold the daemon session list).
 - `spend`: only `bucket=day`. Range = first..last data day, widened to `from`/`to`.
@@ -152,12 +158,14 @@ go to the extension log only).
 - `cache.keepwarm.est_saved` = Σ over pings of cache_read × input price × (1.25 − read
   multiplier): the 5m rewrite the next turn would have paid. Gross, not net of `cost`.
 - `latency`, two generations of api-log timing:
-  - **old rows** (no `runtime_session_id`): `ttft_ms` < 50 ms is treated as null (the bug yields
-    0 in ~99%, 1–40 ms otherwise), and `total_ms` was measured from the *response headers*;
+  - **old rows** (no `runtime_session_id`): api-log `ttft_ms` is never used (0 in ~99%, 1–40 ms
+    otherwise, and even larger values are on the post-headers clock); their TTFT is the trace's
+    `first_model_event_ms` when joined, else null. Their `total_ms` was measured from the
+    *response headers*;
   - **SynapsCLI #322 rows** (have `runtime_session_id`): `ttft_ms`/`total_ms` are measured from
     the *send* (the trace's clock) and trusted as-is; 0 or absent = no model event (null).
   So `total_p50/p95` read higher from the day #322 lands — a measurement change, not a slowdown.
-  TTFT = trace `first_model_event_ms` where joined, else api-log `ttft_ms`.
+  TTFT = trace `first_model_event_ms` where joined, else (new rows only) api-log `ttft_ms`.
   Daily percentiles come from log-bucketed histograms (exact < 100 ms, then 2% buckets: within
   ±1%). `split.stream_p50` = `stream_end_ms − first_model_event_ms`. `retries` counts requests
   with `attempt > 1` or a non-empty trace `retries[]`. `by_context` x = prompt tokens
