@@ -7,6 +7,7 @@
   <title>synaps·dash</title>
   <link rel="preload" href="/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/telemetry.css" />
 </head>
 <body>
   <div id="glow" aria-hidden="true"><div id="glow-a" class="blob"></div><div id="glow-b" class="blob"></div></div>
@@ -50,6 +51,7 @@
         </div>
         <div id="presence"></div>
         <div id="conn"><span class="dot"></span><span id="conn-text">connecting…</span></div>
+        <button id="open-telemetry" class="icon-btn" title="Telemetry" aria-label="Telemetry" aria-pressed="false"><svg class="i" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg></button>
       </header>
 
       <div id="scroller"><div id="thread"></div></div>
@@ -107,5 +109,6 @@
   </div>
   <div id="toasts"></div>
   <script src="/app.js"></script>
+  <script src="/telemetry.js"></script>
 </body>
 </html>
