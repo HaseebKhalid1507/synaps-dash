@@ -172,10 +172,105 @@ The daemon trusts its uid (0600 socket), so **this process is the boundary**:
   default config)
 - `/api/sessions` returns session headers only (id, title, model, times, cost, message count):
   never messages, system prompts or env
+- `/api/telemetry/*` is GET-only and returns aggregates and session headers (ids, titles,
+  token counts, costs, timings). Never messages, prompts, env or tool output. The store
+  reads Synaps' logs read-only and keeps its own SQLite file; nothing is sent anywhere
 - `attach create` config is sanitised (no `prompt_manifest`/`env`; `auto_approve_confirms=false`)
 - `shutdown` / `reload` / `purge` / `hello` / `end` are refused
 - serves only when hosted by a registered daemon (its `daemon*.json` pid == our ppid).
   An in-process Synaps that also loads the plugin stays dormant.
+
+## Telemetry
+
+The bridge also keeps a local telemetry store: what you spent, per day, model, host and
+agent; how well the prompt cache held; how fast the provider answered. It's built from the
+logs Synaps already writes. Nothing new gets logged, nothing leaves the machine.
+
+**What it reads (read-only: opened `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, read, closed; never
+written, moved, truncated or locked; symlinks and FIFOs are skipped, not followed)**
+
+| Source | Gives |
+|---|---|
+| `~/.cache/synaps/api-log.jsonl` (+ `.1 … .N`) | one row per provider request: model, tokens, cache TTL split, timings, stop reason, worker/keep-warm flags, cache-miss reason; with SynapsCLI #322 also the session id, worker agent/handle and `cost_usd` |
+| `~/.cache/synaps/request-trace.jsonl` (+ `.1 … .N`) | per-request timings (headers, first model event, stream end), retries, wire size. Joined on the provider request id |
+| `sessions/*.json` | session headers: title, model, totals, `session_cost`. Only a bounded head is parsed (everything before `api_messages`); subagent `archive_path`s are found by a chunked scan (that's how workers link to their parent). Files that aren't sessions are skipped and counted |
+| `~/.synaps-cli/subagent-history/*/sa_N.json` | worker runs: agent name, model, status (head of the file only) |
+| `synaps.log.*` | legacy `Token Usage:` lines, for cache hit % where the api-log didn't exist yet |
+
+Request-level spend comes from the api-log, priced with a port of SynapsCLI's
+`pricing.rs` (`telemetry/pricing.ts`: API list price, labelled "API-equivalent" in the UI).
+Each session is labelled with the machine it ran on (copies between machines don't move it;
+`unknown` when identical copies leave no way to tell), and its own `session_cost` is used
+only when that machine logged no api-log rows for it, so nothing is counted twice and the
+per-host numbers add up to the total. Compaction calls never reach the
+api-log, so request-level spend runs a little under `session_cost` (about 15% lately).
+Days are local (America/New_York).
+
+Ingest runs every 5 s in a worker thread, so the bridge never waits on it, and a watchdog
+replaces the worker if it goes quiet. Each log is tailed from a saved byte offset per (file,
+inode). Synaps rotates by rename, so a rotated generation is finished from where it left
+off and the fresh file read from 0. A truncated or replaced file restarts, a vanished
+generation's unread bytes are counted (`lost_bytes`), and every insert is idempotent. The
+worker keeps daily rollups, so the endpoints read a row per day, not a row per request: all
+of them answer in under ~15 ms on today's two hosts. A full backfill of two hosts (89K
+requests, 1.1K sessions, 1.4K workers, 316K legacy lines) takes about 5–8 s and peaks around
+130 MB. Errors are counted in `/api/telemetry/health` and never take the extension down.
+
+The store holds titles, costs and paths, so it's owner-only: the directory is `0700` and the
+database (with its `-wal`/`-shm`) `0600`.
+
+**Config** (plugin config, e.g. `extension.synaps-dash.telemetry_host = bella`):
+
+| Key | Default | |
+|---|---|---|
+| `telemetry` | unset: on for the default daemon, off for a profile daemon | `off` disables the store, the ingest and `/api/telemetry/*` (503). A profile daemon (`--profile webproto`, the sandbox) only runs telemetry with an explicit `telemetry = on`, see below |
+| `telemetry_db` | `~/.local/share/synaps-telemetry/telemetry.db` (`telemetry-<profile>.db` for a profile) | SQLite (WAL); safe to delete, it rebuilds |
+| `telemetry_host` | short hostname | label for this machine's rows (`host=` in the API). Delete the DB after changing it |
+| `telemetry_sources` | (none) | extra read-only roots, `host=path,…`: a home dir or a snapshot dir laid out as `cache/ sessions/ subagent-history/ logs/`. An entry named like `telemetry_host` replaces this daemon's own sources |
+
+These keys deliberately have no manifest default. Synaps passes a manifest default to the
+extension as if you had configured it, so "unset" must stay unset for the profile rule to work.
+Synaps resolves each key from, in order: the daemon's env `SYNAPS_EXTENSION_SYNAPS_DASH_<KEY>`,
+`~/.synaps-cli/plugins/synaps-dash/config` (**shared by every profile**), then
+`extension.synaps-dash.<key>` in the profile's config (a profile without its own config reads
+the default one).
+
+**Opting a profile daemon in.** Put it in that profile's own config, not in the shared plugin
+config, and don't set `telemetry = on` in the default config (unset already means on there):
+
+```bash
+# ~/.synaps-cli/webproto/config
+extension.synaps-dash.telemetry = on
+```
+
+It then reads `~/.synaps-cli/webproto/sessions` and the profile's `synaps.log.*` into
+`telemetry-webproto.db`. The api-log and request trace in `~/.cache/synaps` are shared by
+every profile, so the sandbox sees the main daemon's requests too, under its own host label.
+A profile daemon never writes the default daemon's DB, even if a shared config names it.
+
+**Pointing a sandbox at the main data on purpose.** A `telemetry_sources` entry with the same
+name as `telemetry_host` replaces the daemon's own sources:
+
+```bash
+# ~/.synaps-cli/webproto/config
+extension.synaps-dash.telemetry = on
+extension.synaps-dash.telemetry_host = bella
+extension.synaps-dash.telemetry_sources = bella=/home/haseeb,jade=/home/haseeb/Jawz/workspace/synaps-telemetry/raw/jade
+```
+
+That reads exactly what the main daemon reads (main sessions, both hosts), still into
+`telemetry-webproto.db`, and still read-only.
+
+Endpoints (`/api/telemetry/summary|spend|agents|cache|latency|sessions|session/:id|heatmap|health`)
+sit behind the same token cookie as everything else; the shapes are in
+[`docs/telemetry-api.md`](docs/telemetry-api.md). The CLI drives the same code:
+
+```bash
+bun telemetry/cli.ts backfill --db /tmp/t.db --src bella=$HOME --src jade=/path/to/jade-snapshot
+bun telemetry/cli.ts stats --db /tmp/t.db
+bun telemetry/cli.ts query --db /tmp/t.db '/api/telemetry/summary?host=bella'
+bun test   # parsers, rotation/offsets, grain/additivity, DST, pricing (all of pricing.rs's tests), endpoints, perf guard
+```
 
 ## Development
 

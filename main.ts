@@ -18,6 +18,8 @@ import { readFileSync, readdirSync, readlinkSync, writeFileSync, statSync, exist
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { startTelemetry, telemetryConfig, type Telemetry } from "./telemetry/extension.ts";
+import { handleTelemetry } from "./telemetry/http.ts";
 
 const VERSION = "0.1.0";
 const log = (...a: unknown[]) => process.stderr.write(`[synaps-dash] ${a.map(String).join(" ")}\n`);
@@ -26,6 +28,8 @@ const log = (...a: unknown[]) => process.stderr.write(`[synaps-dash] ${a.map(Str
 
 let rpcBuf = Buffer.alloc(0);
 let serverStarted = false;
+let telemetryRaw: Record<string, unknown> = {};
+let telemetry: Telemetry | null = null;
 
 function rpcSend(msg: unknown) {
   const body = JSON.stringify(msg);
@@ -38,6 +42,7 @@ function rpcHandle(msg: any) {
     case "initialize": {
       const cfgPort = Number(msg.params?.config?.port);
       if (Number.isInteger(cfgPort) && cfgPort > 0 && cfgPort < 65536) PORT = cfgPort;
+      telemetryRaw = msg.params?.config ?? {};
       // Answer IMMEDIATELY: the daemon runs extension discovery before it
       // accepts connections, so we must not touch daemon.sock here.
       rpcSend({ jsonrpc: "2.0", id, result: { protocol_version: 1, capabilities: {} } });
@@ -730,6 +735,9 @@ async function startServer() {
           const favorites = (cfg.get("favorite_models") ?? "").split(",").map((x) => x.trim()).filter((x) => MODEL_RE.test(x));
           return Response.json({ model: cfg.get("model") ?? null, favorites });
         }
+        // Telemetry store (read-only over local logs; see telemetry/). Same token gate as everything above.
+        const tr = handleTelemetry(req, url, telemetry?.query ?? null, telemetry?.why ?? "telemetry is starting", (e) => log(`telemetry query failed: ${e}`));
+        if (tr) return tr;
         if (url.pathname === "/api/config") {
           if (req.method === "GET") return Response.json(configSnapshot());
           if (req.method === "POST") return handleConfigPost(req);
@@ -852,6 +860,12 @@ async function startServer() {
   log(`serving on http://${HOST}:${PORT} → ${host.socket} (profile ${host.profile ?? "default"})`);
   void mxcLoop();
   writeUrlFile(host.profile);
+  try {
+    // On by default only for the default daemon; a profile daemon gets its own DB, opt-in.
+    telemetry = startTelemetry(telemetryConfig(telemetryRaw, host.profile ?? null), log);
+  } catch (e) {
+    log(`telemetry: ${e} — telemetry off`);
+  }
 }
 
 let urlPath: string | null = null;
@@ -870,6 +884,7 @@ function writeUrlFile(profile: string | null) {
 }
 
 function shutdown(code: number) {
+  try { telemetry?.stop(); } catch {}
   try { server?.stop(true); } catch {}
   process.exit(code);
 }
