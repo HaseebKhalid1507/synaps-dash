@@ -20,8 +20,6 @@ export const cleanTitle = (t: string | null): string | null => {
   return c || t;
 };
 
-export const TTFT_FLOOR_MS = 50;
-
 export type RequestRow = {
   request_id: string; host: string; ts: number; day: string; wd: number; hour: number;
   model: string; attempt: number; ttft_ms: number | null; total_ms: number | null; stop: string | null;
@@ -90,16 +88,14 @@ export function parseApiLog(line: string | object, host: string): RequestRow | n
   const ttft = optNum(d.ttft_ms);
   // SynapsCLI #322 marks its fixed records with runtime_session_id: ttft_ms/total_ms are then
   // measured from the send (same clock as the trace) and trusted as-is (0/absent = no event).
-  // Older rows: ttft_ms is broken upstream (0 in ~99%, the rest 1–40 ms; no real TTFT is that
-  // fast), so below TTFT_FLOOR_MS → null and the trace join fills TTFT in. Their total_ms was
-  // measured from the response headers, not the send, so it reads lower than new rows'.
+  // Older rows' ttft_ms is never used: 0 in ~99%, the rest 1–40 ms, and even values ≥ 50 ms are
+  // on the post-headers clock. For those, TTFT comes only from the joined trace (else null).
+  // Their total_ms was measured from the response headers, so it reads lower than new rows'.
   const fixedClock = runtime !== null;
   return {
     request_id: rid, host, ts, day: L.day, wd: L.wd, hour: L.hour,
     model, attempt: num(d.attempt) || 1,
-    // api-log ttft_ms is broken upstream: 0 in ~99% of rows, and the rest are 1–40 ms
-    // (no real TTFT is that fast). Below TTFT_FLOOR_MS → null; the trace join fills TTFT in.
-    ttft_ms: ttft === null || ttft <= 0 ? null : fixedClock || ttft >= TTFT_FLOOR_MS ? ttft : null,
+    ttft_ms: fixedClock && ttft !== null && ttft > 0 ? ttft : null,
     timing_v2: fixedClock ? 1 : 0,
     total_ms: optNum(d.total_ms), stop: str(d.stop_reason),
     input, output, cache_read: cr, cache_write: cw, cw5m: cw5, cw1h: cw1, cw_unknown: cwu,

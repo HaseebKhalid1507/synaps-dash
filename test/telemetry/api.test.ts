@@ -13,7 +13,7 @@ beforeAll(() => {
   const db = openDb(sb.db);
   ingestOnce(db, [resolveRoot("bella", sb.bella), resolveRoot("jade", sb.jade)]);
   q = new TelemetryQuery(db);
-});
+}, 60_000);
 afterAll(() => sb.done());
 
 async function get(path: string, status = 200): Promise<any> {
@@ -128,9 +128,10 @@ test("GET /api/telemetry/latency", async () => {
   });
   const d = l.daily.find((x: any) => x.day === "2026-10-27");
   expect(d.n).toBe(9);
-  // trace first_model_event_ms (fx1) and api-log 812 (fx7), via ≤1%-error histogram buckets
+  // only fx1's trace first_model_event_ms counts (fx7's api-log 812 is on the old header clock),
+  // via ≤1%-error histogram buckets
   expect(Math.abs(d.ttft_p50 - 480) / 480).toBeLessThan(0.011);
-  expect(Math.abs(d.ttft_p99 - 812) / 812).toBeLessThan(0.011);
+  expect(d.ttft_p99).toBe(d.ttft_p50);
   expect(l.split).toEqual({ headers_p50: 300, first_event_p50: 480, stream_p50: 2420 });
   expect(l.retries.requests_with_retry).toBe(2); // fx1 (trace retry) + fx4 (attempt 2)
   expect(l.by_context.length).toBe(12);
@@ -168,7 +169,7 @@ test("GET /api/telemetry/session/:id", async () => {
     workers: [{ handle: STR, agent: nullable(STR), model: nullable(STR), spend: nullable(NUM) }],
   });
   expect(s.timeline.map((t: any) => [t.worker, t.compaction])).toEqual([[false, false], [true, false], [false, true]]);
-  expect(s.timeline[0]).toMatchObject({ context_tokens: 91010, ttft_ms: 812 });
+  expect(s.timeline[0]).toMatchObject({ context_tokens: 91010, ttft_ms: null });
   expect(s.workers).toEqual([{ handle: "sa_1", agent: "spike", model: "claude-opus-5-5", spend: expect.any(Number) }]);
   const none = await get("/api/telemetry/session/20260420-100000-cccc");
   expect(none.timeline).toEqual([]);

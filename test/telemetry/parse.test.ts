@@ -23,11 +23,11 @@ test("api-log record → row (usage, context, cost, local day)", () => {
   expect(r.saved).toBeCloseTo((90000 * 4 * 0.95) / 1e6, 12);
 });
 
-test("ttft below the floor is the upstream bug → null; real values kept", () => {
+test("pre-#322 rows: api-log ttft is never trusted (header clock), whatever its value", () => {
   expect(parseApiLog(lines("bella/cache/api-log.jsonl.1")[1], "x")!.ttft_ms).toBeNull(); // 3 ms
-  const r = parseApiLog(lines("bella/cache/api-log.jsonl")[3], "x")!; // req_fx7, 812 ms
+  const r = parseApiLog(lines("bella/cache/api-log.jsonl")[3], "x")!; // req_fx7, 812 ms, no runtime_session_id
   expect(r.request_id).toBe("req_fx7");
-  expect(r.ttft_ms).toBe(812);
+  expect(r.ttft_ms).toBeNull(); // TTFT for old rows comes only from a joined trace
 });
 
 test("worker / keepwarm / cache_diag / refusal flags", () => {
