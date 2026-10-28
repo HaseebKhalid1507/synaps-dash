@@ -365,7 +365,7 @@
   .tl-sub { flex-wrap: wrap; }
 }
 @media (max-width: 860px) {
-  .tl-head { padding: 0 10px 8px; }
+  .tl-head { padding: 0 10px 10px; background: color-mix(in oklab, var(--bg) 94%, transparent); box-shadow: 0 10px 24px -14px rgba(0,0,0,.7); }
   .tl-pulse-t { display: none; }
   .tl-body { padding: 4px 12px 28px; }
   .tl-sub { gap: 8px; }
