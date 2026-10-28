@@ -186,4 +186,9 @@ go to the extension log only).
   `synaps.log.*` files fold into one entry per host (`path` ends `synaps.log.*`, `files`).
 - Local host label = plugin config `telemetry_host` (default: short hostname, `parabellum` on
   bella): set `extension.synaps-dash.telemetry_host = bella`. Profile daemons have telemetry off
-  unless `telemetry = on`, and then use `telemetry-<profile>.db`.
+  unless `telemetry = on`, and then use `telemetry-<profile>.db`. The telemetry plugin keys have
+  no manifest default: Synaps passes a default as if it were configured, so a profile daemon
+  must stay "unset". A profile daemon reads its own `<base>/<profile>/sessions` (plus the shared
+  `~/.cache/synaps` api-log/trace), so its `host` values and session counts differ from the
+  main store's. A `telemetry_sources` entry named like `telemetry_host` replaces the own sources
+  (how to point a sandbox at the main data on purpose; see the README).

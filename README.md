@@ -223,10 +223,43 @@ database (with its `-wal`/`-shm`) `0600`.
 
 | Key | Default | |
 |---|---|---|
-| `telemetry` | `on` for the default daemon, `off` for a profile daemon | `off` disables the store, the ingest and `/api/telemetry/*` (503). A profile daemon (`--profile webproto`, the sandbox) only runs telemetry with `telemetry = on`, and then reads its own `<base>/<profile>/sessions` into its own DB |
+| `telemetry` | unset: on for the default daemon, off for a profile daemon | `off` disables the store, the ingest and `/api/telemetry/*` (503). A profile daemon (`--profile webproto`, the sandbox) only runs telemetry with an explicit `telemetry = on`, see below |
 | `telemetry_db` | `~/.local/share/synaps-telemetry/telemetry.db` (`telemetry-<profile>.db` for a profile) | SQLite (WAL); safe to delete, it rebuilds |
 | `telemetry_host` | short hostname | label for this machine's rows (`host=` in the API). Delete the DB after changing it |
-| `telemetry_sources` | (none) | extra read-only roots, `host=path,…`: a home dir or a snapshot dir laid out as `cache/ sessions/ subagent-history/ logs/` |
+| `telemetry_sources` | (none) | extra read-only roots, `host=path,…`: a home dir or a snapshot dir laid out as `cache/ sessions/ subagent-history/ logs/`. An entry named like `telemetry_host` replaces this daemon's own sources |
+
+These keys deliberately have no manifest default. Synaps passes a manifest default to the
+extension as if you had configured it, so "unset" must stay unset for the profile rule to work.
+Synaps resolves each key from, in order: the daemon's env `SYNAPS_EXTENSION_SYNAPS_DASH_<KEY>`,
+`~/.synaps-cli/plugins/synaps-dash/config` (**shared by every profile**), then
+`extension.synaps-dash.<key>` in the profile's config (a profile without its own config reads
+the default one).
+
+**Opting a profile daemon in.** Put it in that profile's own config, not in the shared plugin
+config, and don't set `telemetry = on` in the default config (unset already means on there):
+
+```bash
+# ~/.synaps-cli/webproto/config
+extension.synaps-dash.telemetry = on
+```
+
+It then reads `~/.synaps-cli/webproto/sessions` and the profile's `synaps.log.*` into
+`telemetry-webproto.db`. The api-log and request trace in `~/.cache/synaps` are shared by
+every profile, so the sandbox sees the main daemon's requests too, under its own host label.
+A profile daemon never writes the default daemon's DB, even if a shared config names it.
+
+**Pointing a sandbox at the main data on purpose.** A `telemetry_sources` entry with the same
+name as `telemetry_host` replaces the daemon's own sources:
+
+```bash
+# ~/.synaps-cli/webproto/config
+extension.synaps-dash.telemetry = on
+extension.synaps-dash.telemetry_host = bella
+extension.synaps-dash.telemetry_sources = bella=/home/haseeb,jade=/home/haseeb/Jawz/workspace/synaps-telemetry/raw/jade
+```
+
+That reads exactly what the main daemon reads (main sessions, both hosts), still into
+`telemetry-webproto.db`, and still read-only.
 
 Endpoints (`/api/telemetry/summary|spend|agents|cache|latency|sessions|session/:id|heatmap|health`)
 sit behind the same token cookie as everything else; the shapes are in
