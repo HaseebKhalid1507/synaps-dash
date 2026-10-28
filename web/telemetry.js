@@ -34,7 +34,15 @@ const Telemetry = (() => {
     if (a < 0.01) return "<$0.01";
     return `$${v.toFixed(2)}`;
   }
-  const usdAxis = (v) => (v >= 1000 ? trim0(`$${(v / 1000).toFixed(1)}K`) : `$${Math.round(v)}`);
+  // axis labels carry as many decimals as the tick STEP needs ($0.37 max →
+  // $0.10 steps, $9 → $2.50), so neighbouring ticks never print the same text
+  const decimals = (x) => { const t = String(+(+x).toPrecision(6)); return t.includes("e-") ? +t.split("e-")[1] : (t.split(".")[1] || "").length; };
+  function usdAxis(v, step = v) {
+    if (v === 0) return "$0";
+    if (v >= 1000) return step >= 100 ? trim0(`$${(v / 1000).toFixed(step % 1000 === 0 ? 0 : step % 100 === 0 ? 1 : 2)}K`) : `$${Math.round(v).toLocaleString()}`;
+    const d = decimals(step);
+    return `$${v.toFixed(d === 0 ? 0 : Math.max(2, d))}`;
+  }
   const pct = (v, d = 1) => (isNum(v) ? `${v.toFixed(d)}%` : DASH);
   function ms(v) {
     if (!isNum(v)) return DASH;
@@ -71,6 +79,18 @@ const Telemetry = (() => {
   const hr12 = (hr) => `${hr % 12 || 12}${hr < 12 ? "a" : "p"}`;
   const hrLong = (hr) => `${hr % 12 || 12} ${hr < 12 ? "AM" : "PM"}`;
   const E = (s) => esc(String(s ?? ""));
+  // Day buckets and heatmap hours are the STORE's local time (API.md: America/New_York).
+  // Through a tunnel from another zone, say so instead of silently shifting.
+  // "unknown" = the store couldn't decide which host a session started on
+  const hostTag = (hst) => (hst === "unknown" ? `<span class="tl-tag dim" title="Origin host couldn't be decided (copies on several hosts, no api-log evidence)">unknown host</span>` : `<span class="tl-tag">${E(hst || DASH)}</span>`);
+  const STORE_TZ = "America/New_York";
+  const tzNote = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone === STORE_TZ ? "" : " (ET, the store's time zone)"; } catch { return ""; } };
+  // stop reasons: Maps, never plain-object lookups (a stop called "constructor"
+  // or "__proto__" must stay a string). null (and the store's old "none") = no stop reason.
+  const NO_STOP = "\u0000none";
+  const stopKey = (v) => (v == null || v === "none" ? NO_STOP : String(v));
+  const stopLabel = (k) => (k === NO_STOP ? "no stop reason" : k.replace(/_/g, " "));
+  const STOP_FLAG = new Map([["refusal", "bad"], ["max_tokens", "warn"], [NO_STOP, "warn"]]);
 
   // ── icons ─────────────────────────────────────────────────────────────────
   const IC = {
@@ -87,37 +107,6 @@ const Telemetry = (() => {
   };
   const ic = (n, cls = "i") => `<svg class="${cls}" viewBox="0 0 24 24">${IC[n]}</svg>`;
 
-  // ── series palette: the album's tokens, most-distinct first ──────────────
-  // Albums often have near-twin tokens (primary ≈ accent). Order the candidates
-  // greedily by oklab distance so stacked series stay tellable apart; the vars
-  // point at the tokens, so a track change still cross-fades every chart.
-  const CANDS = ["--primary", "--secondary", "--success", "--info", "--accent", "--warning"];
-  function oklab(css) {
-    const m = String(css).match(/[\d.]+/g);
-    if (!m || m.length < 3) return null;
-    const [r, g, b] = m.slice(0, 3).map((v) => { v = +v / 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
-    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b), mm = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b), s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
-    return [0.2104542553 * l + 0.793617785 * mm - 0.0040720468 * s, 1.9779984951 * l - 2.428592205 * mm + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * mm - 0.808675766 * s];
-  }
-  function assignSeries() {
-    const cs = getComputedStyle(document.documentElement);
-    const c = CANDS.map((n) => [n, oklab(cs.getPropertyValue(n))]).filter((x) => x[1]);
-    if (c.length < 2) return;
-    const out = [c.shift()];
-    const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-    while (c.length) {
-      let bi = 0, bd = -1;
-      c.forEach((x, i) => { const d = Math.min(...out.map((o) => dist(o[1], x[1]))); if (d > bd) { bd = d; bi = i; } });
-      out.push(c.splice(bi, 1)[0]);
-    }
-    out.forEach(([n], i) => root.style.setProperty(`--s${i}`, `var(${n})`));
-  }
-  let palT = 0;
-  new MutationObserver(() => {
-    clearTimeout(palT);
-    palT = setTimeout(assignSeries, (parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--fade")) || 600) + 60); // after the cross-fade lands
-  }).observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
-
   // ── chart kit ─────────────────────────────────────────────────────────────
   let uid = 0;
   function nice(lo, hi, n = 4) {
@@ -128,6 +117,7 @@ const Telemetry = (() => {
     for (let v = a; v <= hi + step * 0.999; v += step) out.push(+v.toFixed(10));
     return out;
   }
+  const lastOf = (rows, k) => { for (let i = rows.length - 1; i >= 0; i--) if (isNum(rows[i][k])) return rows[i][k]; return null; };
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const f1 = (v) => Math.round(v * 10) / 10;
   // x labels anchored on the newest day, ~one per 76px
@@ -141,9 +131,10 @@ const Telemetry = (() => {
     return s;
   }
   function yGrid(ticks, y, L, W, fmt) {
-    return ticks.map((t) => `<line class="tl-gl" x1="${L}" x2="${W}" y1="${f1(y(t))}" y2="${f1(y(t))}"/><text class="tl-ax" x="${L - 8}" y="${f1(y(t)) + 3.5}" text-anchor="end">${E(fmt(t))}</text>`).join("");
+    const step = ticks.length > 1 ? ticks[1] - ticks[0] : ticks[0] || 1;
+    return ticks.map((t) => `<line class="tl-gl" x1="${L}" x2="${W}" y1="${f1(y(t))}" y2="${f1(y(t))}"/><text class="tl-ax" x="${L - 8}" y="${f1(y(t)) + 3.5}" text-anchor="end">${E(fmt(t, step))}</text>`).join("");
   }
-  const tipRow = (cls, k, v, strong) => `<div class="tt-r${strong ? " tt-tot" : ""}">${cls != null ? `<i class="tl-c${cls}"></i>` : ""}<span>${E(k)}</span><b>${E(v)}</b></div>`;
+  const tipRow = (cls, k, v, strong) => `<div class="tl-tt-r${strong ? " tt-tot" : ""}">${cls != null ? `<i class="tl-c${cls}"></i>` : ""}<span>${E(k)}</span><b>${E(v)}</b></div>`;
 
   // Stacked $ (or tokens) per day. ≤ 62 days: bars; beyond: stacked areas.
   function stack({ days, series, fmt, axis, H = 250, marker }) {
@@ -202,7 +193,7 @@ const Telemetry = (() => {
         const rows = series.map((s) => [s, s.vals[i] || 0]).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
         return {
           g: `<rect class="tl-band" x="${f1(L + i * band)}" y="${T}" width="${f1(band)}" height="${ih}"/>`,
-          html: `<div class="tt-h">${E(dLong(days[i]))}</div>${rows.map(([s, v]) => tipRow(s.c, s.label, fmt(v))).join("")}${series.length > 1 ? tipRow(null, "Total", fmt(tot[i]), true) : ""}`,
+          html: `<div class="tl-tt-h">${E(dLong(days[i]))}</div>${rows.map(([s, v]) => tipRow(s.c, s.label, fmt(v))).join("")}${series.length > 1 ? tipRow(null, "Total", fmt(tot[i]), true) : ""}`,
         };
       };
       return { svg, hover };
@@ -253,9 +244,9 @@ const Telemetry = (() => {
         if (mxp < L - 10 || mxp > W) return null;
         const px = f1(x(i));
         const dots = series.filter((s) => isNum(s.vals[i])).map((s) => `<circle class="tl-c${s.c} tl-dot" cx="${px}" cy="${f1(y(clamp(s.vals[i], t0, t1)))}" r="3.5"/>`).join("");
-        const ex = marks.filter((m) => m.i === i && m.tip).map((m) => `<div class="tt-note">${E(m.tip)}</div>`).join("");
+        const ex = marks.filter((m) => m.i === i && m.tip).map((m) => `<div class="tl-tt-note">${E(m.tip)}</div>`).join("");
         return { g: `<line class="tl-guide" x1="${px}" x2="${px}" y1="${T}" y2="${T + ih}"/>${dots}`,
-          html: `<div class="tt-h">${E(head(i))}</div>${series.map((s) => tipRow(s.c, s.label, fmt(s.vals[i]))).join("")}${ex}` };
+          html: `<div class="tl-tt-h">${E(head(i))}</div>${series.map((s) => tipRow(s.c, s.label, fmt(s.vals[i]))).join("")}${ex}` };
       };
       return { svg, hover };
     };
@@ -289,7 +280,7 @@ const Telemetry = (() => {
         for (const p of pts) { const dx = x(p[0]) - mx, dy = ly(p[1]) - my, dd = dx * dx + dy * dy; if (dd < bd) { bd = dd; best = p; } }
         if (!best) return null;
         return { g: `<circle class="tl-c0 tl-dot" cx="${f1(x(best[0]))}" cy="${f1(ly(best[1]))}" r="4.5"/>`,
-          html: `<div class="tt-h">One request</div>${tipRow(null, "Context", `${num(best[0])} tokens`)}${tipRow(null, "Total time", ms(best[1]))}` };
+          html: `<div class="tl-tt-h">One request</div>${tipRow(null, "Context", `${num(best[0])} tokens`)}${tipRow(null, "Total time", ms(best[1]))}` };
       };
       return { svg, hover };
     };
@@ -315,11 +306,15 @@ const Telemetry = (() => {
   document.addEventListener("pointerdown", (e) => { if (tipOwner && !tipOwner.contains(e.target)) hideTip(); }, true);
 
   // draw a chart into a box at its current width; hover wiring survives redraws
-  function plot(box, make) {
+  // label: a one-line summary for screen readers (the data otherwise lives in
+  // pointer-only tooltips)
+  function plot(box, make, label) {
     box._make = make;
     const W = Math.max(240, Math.floor(box.clientWidth));
     const { svg, hover } = make(W);
     box.innerHTML = svg;
+    const el = box.querySelector("svg");
+    if (el && label) { el.setAttribute("role", "img"); el.setAttribute("aria-label", label); }
     box._hover = hover;
     box._w = W;
     if (box._wired) return;
@@ -383,6 +378,7 @@ const Telemetry = (() => {
   // ── DOM ───────────────────────────────────────────────────────────────────
   const root = h("section", "tl hidden");
   root.id = "telemetry";
+  root.tabIndex = -1;
   root.setAttribute("aria-label", "Telemetry");
   const SECS = [["live", "Live"], ["money", "Money"], ["cache", "Cache"], ["latency", "Latency"], ["sessions", "Sessions"], ["health", "Health"]];
   root.innerHTML = `
@@ -438,7 +434,7 @@ const Telemetry = (() => {
       <section class="tl-sec" data-sec="health">
         <div class="tl-sec-h"><h2>Health</h2></div>
         <div class="tl-grid">
-          <article class="tl-card w12" data-p="heatmap"><header><div><h3>When the agents work</h3><p>Requests by hour × weekday, local time</p></div><div class="tl-ctl tl-heat-peak"></div></header><div class="tl-pb"></div></article>
+          <article class="tl-card w12" data-p="heatmap"><header><div><h3>When the agents work</h3><p class="tl-heat-sub">Requests by hour × weekday, local time</p></div><div class="tl-ctl tl-heat-peak"></div></header><div class="tl-pb"></div></article>
           <article class="tl-card w7" data-p="stops"><header><div><h3>Stop reasons</h3><p>Anomalies highlighted: refusal · max_tokens · no stop reason</p></div></header><div class="tl-pb"></div></article>
           <article class="tl-card w5" data-p="ingest"><header><div><h3>Ingest</h3><p>The telemetry store's own health</p></div></header><div class="tl-pb"></div></article>
         </div>
@@ -446,7 +442,7 @@ const Telemetry = (() => {
       <footer class="tl-foot">Money is an API-equivalent estimate at list prices, not a bill. “—” means no data.</footer>
     </div>
     <div class="tl-scrim hidden"></div>
-    <aside class="tl-detail hidden" role="dialog" aria-modal="false" aria-label="Session detail"></aside>`;
+    <aside class="tl-detail hidden" role="dialog" aria-modal="true" aria-label="Session detail"></aside>`;
   $("main").append(root);
   root.append(tip);
   const q = (s) => root.querySelector(s);
@@ -454,6 +450,49 @@ const Telemetry = (() => {
   const P = {};
   root.querySelectorAll("[data-p]").forEach((el) => { P[el.dataset.p] = { el, box: el.classList.contains("tl-card") ? el.querySelector(".tl-pb") : el }; });
   root.querySelectorAll(".tl-card").forEach((c, i) => c.style.setProperty("--i", i));
+
+  // ── series palette: the album's tokens, most-distinct first ──────────────
+  // Albums often offer only ~3 distinct hues (primary ≈ accent ≈ warning). Pick
+  // six series colours greedily by oklab distance from the raw tokens AND
+  // lighter/darker mixes of them (toward --text / --bg), so stacked bands stay
+  // tellable apart. The vars are color-mix() over the tokens, so a track change
+  // still cross-fades every chart; the picks are redone once the fade lands.
+  const CANDS = ["--primary", "--secondary", "--success", "--info", "--accent", "--warning"];
+  function oklab(css) {
+    const m = String(css).match(/[\d.]+/g);
+    if (!m || m.length < 3) return null;
+    const [r, g, b] = m.slice(0, 3).map((v) => { v = +v / 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b), mm = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b), s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    return [0.2104542553 * l + 0.793617785 * mm - 0.0040720468 * s, 1.9779984951 * l - 2.428592205 * mm + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * mm - 0.808675766 * s];
+  }
+  const mixLab = (a, b, k) => a.map((v, i) => v * k + b[i] * (1 - k)); // == color-mix(in oklab, a k%, b)
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  function assignSeries() {
+    const cs = getComputedStyle(document.documentElement);
+    const text = oklab(cs.getPropertyValue("--text")), bg = oklab(cs.getPropertyValue("--bg"));
+    const toks = CANDS.map((n) => [n, oklab(cs.getPropertyValue(n))]).filter((x) => x[1]);
+    if (toks.length < 2 || !text || !bg) return;
+    const pool = [];
+    for (const [n, lab] of toks) {
+      pool.push({ css: `var(${n})`, lab, raw: true });
+      pool.push({ css: `color-mix(in oklab, var(${n}) 55%, var(--text))`, lab: mixLab(lab, text, 0.55) });
+      pool.push({ css: `color-mix(in oklab, var(${n}) 60%, var(--bg))`, lab: mixLab(lab, bg, 0.6) });
+    }
+    const usable = pool.filter((c) => Math.abs(c.lab[0] - bg[0]) > 0.16); // never near-invisible on the background
+    const out = [usable.shift()];
+    while (out.length < 6 && usable.length) {
+      let bi = 0, bs = -1;
+      usable.forEach((c, i) => { const sc = Math.min(...out.map((o) => dist(o.lab, c.lab))) + (c.raw ? 0.03 : 0); if (sc > bs) { bs = sc; bi = i; } });
+      out.push(usable.splice(bi, 1)[0]);
+    }
+    out.forEach((c, i) => root.style.setProperty(`--s${i}`, c.css));
+    root.dataset.series = out.map((c) => c.lab.map((v) => v.toFixed(3)).join(",")).join(" "); // test hook: picked colours
+  }
+  let palT = 0;
+  new MutationObserver(() => {
+    clearTimeout(palT);
+    palT = setTimeout(assignSeries, (parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--fade")) || 600) + 60); // after the cross-fade lands
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ["style"] });
 
   // filters
   const RANGES = [["7", "7d"], ["30", "30d"], ["90", "90d"], ["all", "All"]];
@@ -473,7 +512,7 @@ const Telemetry = (() => {
     hostSeg = next;
     requestAnimationFrame(() => next._place());
   }
-  const rangeSeg = seg(RANGES, st.range, (v) => { st.range = v; loadAll(false); }, "Range");
+  const rangeSeg = seg(RANGES, st.range, (v) => { st.range = v; st.offset = 0; loadAll(false); }, "Range");
   hostSeg.classList.add("tl-host", "hidden");
   rangeSeg.classList.add("tl-range");
   q(".tl-filters").append(hostSeg, rangeSeg);
@@ -504,10 +543,30 @@ const Telemetry = (() => {
     latency: { url: () => `/latency${qs({ ...range(), ...host() })}`, panels: ["ttft", "total", "split", "scatter"] },
     sessions: { url: () => `/sessions${qs({ sort: st.sort, limit: st.limit, offset: st.offset, q: st.q, ...range(), ...host() })}`, panels: ["sessions"] },
     heatmap: { url: () => `/heatmap${qs({ ...range(), ...host() })}`, panels: ["heatmap"] },
-    health: { url: () => `/health${qs(host())}`, panels: ["stops", "ingest"] },
+    health: { url: () => `/health${qs({ ...range(), ...host() })}`, panels: ["stops", "ingest"] }, // stops follow the range; ingest isn't ranged
   };
-  async function get(path) {
-    const r = await fetch(API + path, { headers: { accept: "application/json" }, credentials: "same-origin" });
+  // One in-flight request per endpoint: a newer load aborts the older one, close()
+  // aborts everything, and nothing waits longer than 15s. A hung store must not
+  // pin the browser's per-host connection pool (6 over HTTP/1.1, e.g. a tunnel).
+  const TIMEOUT_MS = 15000;
+  const inflight = new Map();
+  async function get(path, key) {
+    if (key) inflight.get(key)?.abort(new DOMException("superseded", "AbortError"));
+    const ctl = new AbortController();
+    if (key) inflight.set(key, ctl);
+    const timer = setTimeout(() => ctl.abort(new DOMException(`timed out after ${TIMEOUT_MS / 1000}s`, "TimeoutError")), TIMEOUT_MS);
+    try {
+      return await fetchJson(path, ctl.signal);
+    } catch (e) {
+      throw ctl.signal.aborted ? ctl.signal.reason : e;
+    } finally {
+      clearTimeout(timer);
+      if (key && inflight.get(key) === ctl) inflight.delete(key);
+    }
+  }
+  const abortAll = () => { for (const c of inflight.values()) c.abort(new DOMException("closed", "AbortError")); inflight.clear(); };
+  async function fetchJson(path, signal) {
+    const r = await fetch(API + path, { headers: { accept: "application/json" }, credentials: "same-origin", signal });
     if (!r.ok) {
       let msg = "";
       try { msg = (await r.json())?.error || ""; } catch {}
@@ -530,7 +589,7 @@ const Telemetry = (() => {
     el.classList.remove("is-loading");
     el.classList.add("is-err");
     if (id === "headline") { box.innerHTML = ""; return; }
-    box.innerHTML = `<div class="tl-err" role="alert">${ic("warn")}<div><b>Couldn't load this panel</b><span>${E(`/api/telemetry/${ep} — ${err?.message || err}`)}</span></div><button type="button" class="btn-ghost tl-retry">${ic("retry")}Retry</button></div>`;
+    box.innerHTML = `<div class="tl-err" role="status" aria-live="polite">${ic("warn")}<div><b>Couldn't load this panel</b><span>${E(`/api/telemetry/${ep} — ${err?.message || err}`)}</span></div><button type="button" class="btn-ghost tl-retry">${ic("retry")}Retry</button></div>`;
     box.querySelector(".tl-retry").onclick = () => load(ep);
   }
   async function load(ep, quiet = false) {
@@ -539,13 +598,13 @@ const Telemetry = (() => {
     if (!quiet || !st.data[ep]) for (const id of def.panels) skeleton(id);
     else for (const id of def.panels) P[id].el.classList.add("is-busy");
     try {
-      const d = await get(def.url());
+      const d = await get(def.url(), ep);
       if (seq !== st.seq[ep]) return;
       st.data[ep] = d;
       st.err[ep] = null;
       for (const id of def.panels) draw(id);
     } catch (e) {
-      if (seq !== st.seq[ep]) return;
+      if (seq !== st.seq[ep] || e?.name === "AbortError") return; // superseded or closed: not an error
       st.err[ep] = e;
       if (quiet && st.data[ep] && ep === "summary") { for (const id of def.panels) P[id].el.classList.remove("is-busy"); return; } // a failed background poll keeps the last good numbers
       for (const id of def.panels) fail(id, ep, e);
@@ -592,7 +651,7 @@ const Telemetry = (() => {
         ["req", "Requests today", n.requests_today, int, "since midnight"],
         ["hit", "Cache hit · 1h", n.hit_pct_1h, (v) => pct(v), "of prompt tokens"],
         ["ttft", "TTFT p50 · 1h", n.ttft_p50_ms_1h, ms, `total p50 ${ms(n.total_p50_ms_1h)}`],
-        ["live", "Live now", n.live_sessions, int, !isNum(n.live_sessions) && !isNum(n.live_workers) ? "not tracked by the store yet"
+        ["live", "Live now", n.live_sessions, int, !isNum(n.live_sessions) && !isNum(n.live_workers) ? "not tracked yet"
           : `sessions · ${int(n.live_workers)} worker${n.live_workers === 1 ? "" : "s"}`],
       ];
       if (!box.querySelector(".tl-tile[data-k]")) box.innerHTML = tiles.map(([k, l], i) => `<div class="tl-tile" data-k="${k}" style="--i:${i}"><div class="tl-tile-l">${l}</div><div class="tl-tile-v"><span></span></div><div class="tl-tile-s"></div></div>`).join("");
@@ -609,9 +668,12 @@ const Telemetry = (() => {
     headline(box) {
       const a = st.data.summary?.all || {};
       const since = isNum(a.first_ts) ? new Date(a.first_ts).toLocaleDateString([], { month: "long", ...(new Date(a.first_ts).getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) }) : null;
-      box.innerHTML = `<span class="tl-hl-k">${since ? `since ${E(since)}` : "all time"}</span> <b class="tl-hl-v">${E(usd(a.spend))}</b> <span class="tl-hl-sep">·</span> `
-        + `<span class="tl-hl-k">cache saved</span> <b class="tl-hl-v ok">${E(usd(a.saved_by_cache))}</b> <span class="tl-hl-sep">·</span> `
-        + `<span class="tl-hl-k">${E(num(a.requests))} requests · ${E(num(a.sessions))} sessions</span>`;
+      // net = gross minus the write premium caching costs; gross on hover, labelled as gross
+      const net = isNum(a.saved_by_cache_net) ? a.saved_by_cache_net : null;
+      const savedTitle = `Gross: ${usd(a.saved_by_cache)} (every cache read billed as fresh input, minus actual).${net != null ? ` Net subtracts the cache-write premium.` : ""}`;
+      box.innerHTML = `<span class="tl-hl-g"><span class="tl-hl-k">${since ? `since ${E(since)}` : "all time"}</span> <b class="tl-hl-v">${E(usd(a.spend))}</b></span>`
+        + `<span class="tl-hl-g" title="${E(savedTitle)}"><span class="tl-hl-k">cache saved${net != null ? " (net)" : " (gross)"}</span> <b class="tl-hl-v ok">${E(usd(net ?? a.saved_by_cache))}</b></span>`
+        + `<span class="tl-hl-g"><span class="tl-hl-k">${E(num(a.requests))} requests · ${E(num(a.sessions))} sessions</span></span>`;
     },
     spend(box) {
       const d = st.data.spend;
@@ -634,7 +696,9 @@ const Telemetry = (() => {
       box.innerHTML = `<div class="tl-chart"></div><div class="tl-legend">${ser.map((s) => `<span class="tl-lg"><i class="tl-c${s.c}"></i>${E(s.label)}<b>${E(usd(s.tot))}</b><em>${E(pct(total ? (s.tot / total) * 100 : null, 0))}</em></span>`).join("")}${marker && days[0] < marker.day && days.includes(marker.day) ? `<span class="tl-lg tl-lg-mk"><i></i>data grain switches ${E(dShort(marker.day))}</span>` : ""}</div>`;
       const ch = box.querySelector(".tl-chart");
       ch.dataset.n = days.length;
-      plot(ch, stack({ days, series: ser, fmt: usd, axis: usdAxis, H: 260, marker }));
+      const tot = days.map((_, i) => ser.reduce((a, x) => a + (x.vals[i] || 0), 0)), pk = tot.indexOf(Math.max(...tot));
+      plot(ch, stack({ days, series: ser, fmt: usd, axis: usdAxis, H: 260, marker }),
+        `Spend per day, ${days.length} days, ${usd(total)} total (API-equivalent), peak ${dShort(days[pk])} ${usd(tot[pk])}; ${ser.map((x) => `${x.label} ${usd(x.tot)}`).join(", ")}`);
     },
     agents(box) {
       const raw = st.data.agents?.agents || [];
@@ -657,16 +721,18 @@ const Telemetry = (() => {
       const days = d.map((x) => x.day), vals = d.map((x) => x.hit_pct);
       const ok = vals.filter(isNum);
       const marks = (st.data.cache.releases || []).map((r) => ({ i: days.indexOf(ymd(new Date(r.ts))), label: r.tag, tip: `Synaps ${r.tag} released ${tsLong(r.ts)}` })).filter((m) => m.i >= 0);
-      const cut = d.findIndex((x) => x.grain === "request");
+      const cut = d.findIndex((x) => x.grain === "request" || x.grain === "mixed");
       if (cut > 0) marks.push({ i: cut, label: "", cls: "grain", tip: "Request-level data from here; before: synaps.log totals" });
       const lo = ok.length ? Math.max(0, Math.floor(Math.min(...ok) - 0.6)) : 0;
       const avg = ok.length ? ok.reduce((a, b) => a + b, 0) / ok.length : null;
-      box.innerHTML = `<div class="tl-kpis"><div><span>latest</span><b>${pct(ok[ok.length - 1])}</b></div><div><span>average</span><b>${pct(avg)}</b></div><div><span>lowest</span><b>${pct(ok.length ? Math.min(...ok) : null)}</b></div></div><div class="tl-chart"></div>`;
-      plot(box.querySelector(".tl-chart"), lines({ n: days.length, series: [{ label: "Hit rate", vals, c: 0 }], fmt: (v) => pct(v), axis: (v) => `${trim0(v.toFixed(1))}%`, label: (i) => dShort(days[i]), head: (i) => dLong(days[i]), lo, hi: 100, marks, H: 210 }));
+      const lastD = d[d.length - 1];
+      box.innerHTML = `<div class="tl-kpis"><div><span>${E(dShort(lastD.day))}</span><b>${pct(lastD.hit_pct)}</b></div><div><span>average</span><b>${pct(avg)}</b></div><div><span>lowest</span><b>${pct(ok.length ? Math.min(...ok) : null)}</b></div></div><div class="tl-chart"></div>`;
+      plot(box.querySelector(".tl-chart"), lines({ n: days.length, series: [{ label: "Hit rate", vals, c: 0 }], fmt: (v) => pct(v), axis: (v) => `${trim0(v.toFixed(1))}%`, label: (i) => dShort(days[i]), head: (i) => dLong(days[i]), lo, hi: 100, marks, H: 210 }),
+        `Cache hit rate per day, ${days.length} days: ${dShort(lastD.day)} ${pct(lastD.hit_pct)}, average ${pct(avg)}, lowest ${pct(ok.length ? Math.min(...ok) : null)}`);
     },
     keepwarm(box) {
       const k = st.data.cache?.keepwarm;
-      if (!k || (!isNum(k.pings) && !isNum(k.cost))) return empty(box, "No keep-warm pings recorded.");
+      if (!k || !isNum(k.pings) || k.pings <= 0) return empty(box, "No keep-warm pings in this range.");
       const max = Math.max(k.cost || 0, k.est_saved || 0, 0.0001);
       const roi = isNum(k.cost) && isNum(k.est_saved) && k.cost > 0 ? k.est_saved / k.cost : null;
       const net = isNum(k.cost) && isNum(k.est_saved) ? k.est_saved - k.cost : null;
@@ -682,20 +748,23 @@ const Telemetry = (() => {
       const d = st.data.cache?.daily || [];
       if (!d.length) return empty(box, "No cache writes in this range.");
       const days = d.map((x) => x.day);
-      // legacy days (before the request log) only know the un-split total
-      const legacy = (x) => x.grain === "legacy" || (!isNum(x.write_5m) && !isNum(x.write_1h) && isNum(x.write));
+      // writes with no TTL split (legacy log lines, api-log rows without 5m/1h):
+      // write_unknown; older stores only sent `write` on legacy days
+      const unk = (x) => (isNum(x.write_unknown) ? x.write_unknown : x.grain === "legacy" && !isNum(x.write_5m) && !isNum(x.write_1h) && isNum(x.write) ? x.write : null);
       const series = [{ label: "1h TTL", vals: d.map((x) => x.write_1h), c: 0 }, { label: "5m TTL", vals: d.map((x) => x.write_5m), c: 1 }];
-      if (d.some(legacy)) series.push({ label: "Un-split (legacy log)", vals: d.map((x) => (legacy(x) ? x.write : null)), c: 3 });
+      if (d.some((x) => isNum(unk(x)) && unk(x) > 0)) series.push({ label: "TTL unknown", vals: d.map(unk), c: 2 });
       const sum = (v) => v.reduce((a, b) => a + (b || 0), 0);
-      const cut = d.find((x) => x.grain === "request")?.day;
+      const legacy = (x) => x.grain === "legacy";
+      const cut = d.find((x) => x.grain === "request" || x.grain === "mixed")?.day;
       box.innerHTML = `<div class="tl-chart"></div><div class="tl-legend">${series.map((x) => `<span class="tl-lg"><i class="tl-c${x.c}"></i>${E(x.label)}<b>${num(sum(x.vals))}</b><em>tokens</em></span>`).join("")}</div>`;
-      plot(box.querySelector(".tl-chart"), stack({ days, series, fmt: (v) => `${num(v)} tokens`, axis: num, H: 200, marker: cut && d.some(legacy) ? { day: cut, left: "legacy log", right: "request-level →" } : null }));
+      plot(box.querySelector(".tl-chart"), stack({ days, series, fmt: (v) => `${num(v)} tokens`, axis: num, H: 200, marker: cut && d.some(legacy) ? { day: cut, left: "legacy log", right: "request-level →" } : null }),
+        `Cache writes per day, ${days.length} days: ${series.map((x) => `${x.label} ${num(sum(x.vals))} tokens`).join(", ")}`);
     },
     miss(box) {
       const m = (st.data.cache?.miss_reasons || []).slice().sort((a, b) => b.count - a.count);
       if (!m.length) return empty(box, "No cache misses recorded.");
       const total = m.reduce((a, r) => a + r.count, 0);
-      box.innerHTML = hbars(m.map((r) => ({ k: r.reason.replace(/_/g, " "), v: r.count })), { total, cls: (r, i) => (i === 0 ? 0 : 1) })
+      box.innerHTML = hbars(m.map((r) => ({ k: String(r.reason ?? "unknown").replace(/_/g, " "), v: r.count })), { total, cls: (r, i) => (i === 0 ? 0 : 1) })
         + `<div class="tl-note">${int(total)} misses with a reason, in range</div>`;
     },
     ttft(box) {
@@ -703,14 +772,16 @@ const Telemetry = (() => {
       if (!d.length || !d.some((x) => isNum(x.ttft_p50))) return empty(box, "No time-to-first-token data in this range.");
       const days = d.map((x) => x.day);
       plot(box, lines({ n: days.length, label: (i) => dShort(days[i]), head: (i) => `${dLong(days[i])} · ${int(d[i].n)} req`, fmt: ms, axis: msAxis, H: 220, lo: 0,
-        series: [{ label: "p50", vals: d.map((x) => x.ttft_p50), c: 0 }, { label: "p95", vals: d.map((x) => x.ttft_p95), c: 1, thin: true }, { label: "p99", vals: d.map((x) => x.ttft_p99), c: 2, thin: true, dash: true }] }));
+        series: [{ label: "p50", vals: d.map((x) => x.ttft_p50), c: 0 }, { label: "p95", vals: d.map((x) => x.ttft_p95), c: 1, thin: true }, { label: "p99", vals: d.map((x) => x.ttft_p99), c: 2, thin: true, dash: true }] }),
+        `Time to first token per day, ${days.length} days; latest day p50 ${ms(lastOf(d, "ttft_p50"))}, p95 ${ms(lastOf(d, "ttft_p95"))}, p99 ${ms(lastOf(d, "ttft_p99"))}`);
     },
     total(box) {
       const d = st.data.latency?.daily || [];
       if (!d.length) return empty(box, "No latency data in this range.");
       const days = d.map((x) => x.day);
       plot(box, lines({ n: days.length, label: (i) => dShort(days[i]), head: (i) => `${dLong(days[i])} · ${int(d[i].n)} req`, fmt: ms, axis: msAxis, H: 220, lo: 0,
-        series: [{ label: "p50", vals: d.map((x) => x.total_p50), c: 0 }, { label: "p95", vals: d.map((x) => x.total_p95), c: 1, thin: true }] }));
+        series: [{ label: "p50", vals: d.map((x) => x.total_p50), c: 0 }, { label: "p95", vals: d.map((x) => x.total_p95), c: 1, thin: true }] }),
+        `Total request time per day, ${days.length} days; latest day p50 ${ms(lastOf(d, "total_p50"))}, p95 ${ms(lastOf(d, "total_p95"))}`);
     },
     split(box) {
       const s = st.data.latency?.split || {}, r = st.data.latency?.retries || {};
@@ -726,7 +797,7 @@ const Telemetry = (() => {
       const pts = (st.data.latency?.by_context || []).filter((p) => isNum(p[0]) && isNum(p[1]));
       if (pts.length < 2) return empty(box, "Not enough sampled requests yet.");
       box.innerHTML = `<div class="tl-chart"></div><div class="tl-legend"><span class="tl-lg"><i class="tl-c0"></i>request</span><span class="tl-lg"><i class="tl-c2 ln"></i>median by context</span><span class="tl-lg dim">x: prompt tokens · y: total time (log) · ${int(pts.length)} samples</span></div>`;
-      plot(box.querySelector(".tl-chart"), scatter(pts, 250));
+      plot(box.querySelector(".tl-chart"), scatter(pts, 250), `Latency against prompt size: ${int(pts.length)} sampled requests, total time on a log scale against prompt tokens, with a median line`);
     },
     sessions(box) {
       const d = st.data.sessions;
@@ -738,8 +809,8 @@ const Telemetry = (() => {
       root.querySelector(".tl-sess-sub").textContent = `${int(total)} session${total === 1 ? "" : "s"}${st.q ? ` matching “${st.q}”` : ""} · click a row for its request timeline`;
       box.innerHTML = `<div class="tl-tw"><table class="tl-table tl-rows"><thead><tr>${COLS.map(([k, t, cls = "", s]) => `<th class="${cls}${s ? " sortable" : ""}${s === st.sort ? " on" : ""}"${s ? ` data-sort="${s}" tabindex="0" aria-sort="${s === st.sort ? "descending" : "none"}"` : ""}>${t}${s ? `<span class="tl-arrow">↓</span>` : ""}</th>`).join("")}</tr></thead>
         <tbody>${rows.map((r, i) => `<tr data-id="${E(r.id)}" tabindex="0" style="--i:${Math.min(i, 20)}">
-          <td><div class="tl-st">${E(r.title || r.id)}</div><div class="tl-sid">${E(r.id)}</div></td>
-          <td class="hide-sm"><span class="tl-tag">${E(r.host || DASH)}</span></td><td class="hide-md mono">${E(shortModel(r.model) || DASH)}</td>
+          <td><div class="tl-st"${r.title_raw && r.title_raw !== r.title ? ` title="${E(r.title_raw)}"` : ""}>${E(r.title || r.id)}</div><div class="tl-sid">${E(r.id)}</div></td>
+          <td class="hide-sm">${hostTag(r.host)}</td><td class="hide-md mono">${E(shortModel(r.model) || DASH)}</td>
           <td class="num">${int(r.requests)}</td><td class="num strong">${usd(r.spend)}</td><td class="num hide-sm">${pct(r.hit_pct)}</td>
           <td class="num hide-md">${num(r.peak_context_tokens)}</td><td class="num hide-md">${int(r.workers)}</td><td class="num dim" title="${E(isNum(r.updated) ? new Date(r.updated).toLocaleString() : "")}">${rel(r.updated)}</td></tr>`).join("")}</tbody></table>
         ${rows.length ? "" : `<div class="tl-empty">${st.q ? "No sessions match that search." : "No sessions in this range."}</div>`}</div>
@@ -770,7 +841,10 @@ const Telemetry = (() => {
       let pk = [0, 0];
       grid.forEach((r, wd) => r.forEach((n, hr) => { if ((n || 0) > (grid[pk[0]][pk[1]] || 0)) pk = [wd, hr]; }));
       q(".tl-heat-peak").innerHTML = `<span class="tl-peak">Peak <b>${WD[pk[0]]} ${hrLong(pk[1])}</b> · ${num(grid[pk[0]][pk[1]])} req</span>`;
-      let html = `<div class="tl-heat" style="--rows:7"><div class="tl-hm-corner"></div><div class="tl-hm-cols">${colT.map((t, hr) => `<div class="tl-hm-col" data-h="${hr}"><i style="height:${((t / cMax) * 100).toFixed(1)}%"></i></div>`).join("")}</div><div></div>`;
+      q(".tl-heat-sub").textContent = `Requests by hour × weekday, local time${tzNote()}`;
+      const busiest = rowT.indexOf(Math.max(...rowT)), quiet = colT.indexOf(Math.min(...colT));
+      const aria = `Heatmap of ${num(sum)} requests by weekday and hour${tzNote()}. Peak ${WDL[pk[0]]} ${hrLong(pk[1])} with ${int(grid[pk[0]][pk[1]])} requests; busiest day ${WDL[busiest]}; quietest hour ${hrLong(quiet)}.`;
+      let html = `<div class="tl-heat" style="--rows:7" role="img" aria-label="${E(aria)}"><div class="tl-hm-corner"></div><div class="tl-hm-cols">${colT.map((t, hr) => `<div class="tl-hm-col" data-h="${hr}"><i style="height:${((t / cMax) * 100).toFixed(1)}%"></i></div>`).join("")}</div><div></div>`;
       grid.forEach((r, wd) => {
         html += `<div class="tl-hm-wd">${WD[wd]}</div><div class="tl-hm-row">${r.map((n, hr) => {
           const v = isNum(n) ? Math.sqrt(n / max) : 0;
@@ -788,7 +862,7 @@ const Telemetry = (() => {
         c.classList.add("on");
         const wd = +c.dataset.wd, hr = +c.dataset.h, n = grid[wd][hr];
         tipOwner = hm;
-        showTip(`<div class="tt-h">${WDL[wd]} · ${hrLong(hr)}–${hrLong((hr + 1) % 24)}</div>${tipRow(null, "Requests", int(n))}${tipRow(null, "Share of week", isNum(n) ? pct((n / sum) * 100, 2) : DASH)}${tipRow(null, `vs ${WD[wd]} avg`, isNum(n) && rowT[wd] ? `${((n / (rowT[wd] / 24)) || 0).toFixed(1)}×` : DASH)}`, e.clientX, e.clientY);
+        showTip(`<div class="tl-tt-h">${WDL[wd]} · ${hrLong(hr)}–${hrLong((hr + 1) % 24)}</div>${tipRow(null, "Requests", int(n))}${tipRow(null, "Share of week", isNum(n) ? pct((n / sum) * 100, 2) : DASH)}${tipRow(null, `vs ${WD[wd]} avg`, isNum(n) && rowT[wd] ? `${((n / (rowT[wd] / 24)) || 0).toFixed(1)}×` : DASH)}`, e.clientX, e.clientY);
       };
       hm.addEventListener("pointermove", over);
       hm.addEventListener("pointerdown", over);
@@ -799,9 +873,7 @@ const Telemetry = (() => {
       const s = (d.stops || []).slice().sort((a, b) => b.count - a.count);
       if (!s.length) return empty(box, "No stop reasons recorded.");
       const total = s.reduce((a, r) => a + r.count, 0);
-      const BAD = { refusal: "bad", max_tokens: "warn", null: "warn", none: "warn" };
-      const LABEL = { null: "no stop reason", none: "no stop reason" };
-      box.innerHTML = hbars(s.map((r) => ({ k: LABEL[String(r.stop)] || String(r.stop).replace(/_/g, " "), v: r.count, flag: BAD[String(r.stop)] })), { total, cls: (r) => (r.flag === "bad" ? "e" : r.flag === "warn" ? "w" : 0) })
+      box.innerHTML = hbars(s.map((r) => { const k = stopKey(r.stop); return { k: stopLabel(k), v: r.count, flag: STOP_FLAG.get(k) }; }), { total, cls: (r) => (r.flag === "bad" ? "e" : r.flag === "warn" ? "w" : 0) })
         + `<div class="tl-chips"><span class="tl-chip2">${ic("retry")}<b>${int(d.refusal_retries)}</b> refusal retries</span><span class="tl-chip2${d.translation_losses > 0 ? " warn" : ""}"><b>${int(d.translation_losses)}</b> translation losses</span><span class="tl-chip2"><b>${int(d.tools_changed_misses)}</b> tools-changed misses</span></div>`;
     },
     ingest(box) {
@@ -815,7 +887,7 @@ const Telemetry = (() => {
       box.innerHTML = `<div class="tl-ing-top"><div class="tl-ing-st ${cls}"><span class="dot"></span>${label}</div>
           <div class="tl-ing-when" title="${E(!never ? new Date(g.last_run).toLocaleString() : "")}">last run <b>${rel(g.last_run)}</b>${isNum(g.last_run_ms) ? ` · took ${ms(g.last_run_ms)}` : ""}</div></div>
         ${g.last_error ? `<div class="tl-ing-err">${ic("warn")}<span>${E(g.last_error)}</span></div>` : ""}
-        <div class="tl-ing-grid">${["requests", "traces", "sessions", "workers", "legacy"].map((k) => `<div><span>${k}</span><b>${num(rows[k])}</b></div>`).join("")}<div><span>errors</span><b class="${g.errors > 0 ? "bad" : ""}">${int(g.errors)}</b></div><div><span>bad lines</span><b class="${g.bad_lines > 0 ? "warnc" : ""}">${int(g.bad_lines)}</b></div><div><span>skipped files</span><b>${int(g.skipped_files)}</b></div></div>
+        <div class="tl-ing-grid">${["requests", "traces", "sessions", "workers", "legacy"].map((k) => `<div><span>${k}</span><b>${num(rows[k])}</b></div>`).join("")}<div><span>errors</span><b class="${g.errors > 0 ? "bad" : ""}">${int(g.errors)}</b></div><div><span>bad lines</span><b class="${g.bad_lines > 0 ? "warnc" : ""}">${int(g.bad_lines)}</b></div><div title="A lower bound on log bytes that rotated away before they were read"><span>lost</span><b class="${g.lost_bytes > 0 ? "warnc" : ""}">${isNum(g.lost_bytes) ? bytes(g.lost_bytes) : DASH}</b></div><div><span>skipped files</span><b>${int(g.skipped_files)}</b></div></div>
         ${(g.sources || []).length ? `<div class="tl-srcs">${g.sources.map((x) => {
           const p = isNum(x.size) && x.size > 0 && isNum(x.offset) ? clamp(x.offset / x.size, 0, 1) : null;
           return `<div class="tl-src"><span class="tl-tag">${E(x.host)}</span>${x.kind ? `<span class="tl-tag kind">${E(x.kind)}</span>` : ""}<span class="tl-src-p" title="${E(x.path)}">${E(tildify(x.path))}${isNum(x.files) ? ` <em>· ${int(x.files)} files</em>` : ""}</span>
@@ -828,25 +900,29 @@ const Telemetry = (() => {
   // ── session detail (slide-over) ───────────────────────────────────────────
   const det = q(".tl-detail"), scrim = q(".tl-scrim");
   scrim.onclick = () => closeDetail();
+  // the detail is modal: everything behind the scrim goes inert while it's open
+  const behind = () => [q(".tl-head"), body];
   async function openDetail(id) {
     hideTip();
+    if (!st.detail) st.detailFrom = id; // the row to hand focus back to
     st.detail = id;
+    behind().forEach((el) => (el.inert = true));
     const row = st.data.sessions?.rows?.find((r) => r.id === id);
     det.classList.remove("hidden");
     scrim.classList.remove("hidden");
-    det.innerHTML = `<header class="tl-d-head"><button type="button" class="icon-btn tl-d-close" aria-label="Close session detail" title="Close (Esc)">${ic("back")}</button><div class="tl-d-t"><h3>${E(row?.title || id)}</h3><div class="tl-sid">${E(id)}</div></div></header><div class="tl-d-body"><div class="tl-skel blk" style="height:120px"></div><div class="tl-skel blk" style="height:220px"></div><div class="tl-skel blk" style="height:140px"></div></div>`;
+    det.innerHTML = `<header class="tl-d-head"><button type="button" class="icon-btn tl-d-close" aria-label="Close session detail" title="Close (Esc)">${ic("back")}</button><div class="tl-d-t"><h3>${E(row?.title || id)}</h3><div class="tl-sid">${E(id)}</div></div></header><div class="tl-d-body" tabindex="-1"><div class="tl-skel blk" style="height:120px"></div><div class="tl-skel blk" style="height:220px"></div><div class="tl-skel blk" style="height:140px"></div></div>`;
     det.querySelector(".tl-d-close").onclick = () => closeDetail();
     anim(det, [{ transform: "translateX(24px)", opacity: 0 }, { transform: "none", opacity: 1 }], { duration: 380 });
     anim(scrim, [{ opacity: 0 }, { opacity: 1 }], { duration: 220 });
-    det.querySelector(".tl-d-close").focus({ preventScroll: true });
+    det.querySelector(".tl-d-body").focus({ preventScroll: true }); // arrows/PageDown scroll the detail
     try {
-      const d = await get(`/session/${encodeURIComponent(id)}`);
+      const d = await get(`/session/${encodeURIComponent(id)}`, "detail");
       if (st.detail !== id) return;
       st.detailData = d;
       drawDetail(d);
     } catch (e) {
-      if (st.detail !== id) return;
-      det.querySelector(".tl-d-body").innerHTML = `<div class="tl-err" role="alert">${ic("warn")}<div><b>Couldn't load this session</b><span>${E(`/api/telemetry/session/${id} — ${e.message || e}`)}</span></div><button type="button" class="btn-ghost tl-retry">${ic("retry")}Retry</button></div>`;
+      if (st.detail !== id || e?.name === "AbortError") return;
+      det.querySelector(".tl-d-body").innerHTML = `<div class="tl-err" role="status" aria-live="polite">${ic("warn")}<div><b>Couldn't load this session</b><span>${E(`/api/telemetry/session/${id} — ${e.message || e}`)}</span></div><button type="button" class="btn-ghost tl-retry">${ic("retry")}Retry</button></div>`;
       det.querySelector(".tl-retry").onclick = () => openDetail(id);
     }
   }
@@ -854,8 +930,9 @@ const Telemetry = (() => {
     const s = d.session || {}, tl = d.timeline || [], wk = d.workers || [];
     det.classList.toggle("tl-still", still);
     det.querySelector(".tl-d-t h3").textContent = s.title || s.id;
+    if (s.title_raw && s.title_raw !== s.title) det.querySelector(".tl-d-t h3").title = s.title_raw;
     const stats = [["Spend", usd(s.spend)], ["Requests", int(s.requests)], ["Hit", pct(s.hit_pct)], ["Peak context", num(s.peak_context_tokens)], ["Workers", int(s.workers)], ["Duration", isNum(s.created) && isNum(s.updated) ? span(s.created, s.updated) : DASH]];
-    let html = `<div class="tl-d-chips"><span class="tl-tag">${E(s.host || DASH)}</span><span class="tl-tag mono">${E(shortModel(s.model) || DASH)}</span><span class="dim">${isNum(s.created) ? E(new Date(s.created).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })) : ""}</span></div>
+    let html = `<div class="tl-d-chips">${hostTag(s.host)}<span class="tl-tag mono">${E(shortModel(s.model) || DASH)}</span>${s.grain ? `<span class="tl-tag" title="${E(s.grain === "session" ? "Spend from the session file (no request rows overlap it)" : "Spend from request-level api-log rows")}">${E(`${s.grain} grain`)}</span>` : ""}<span class="dim">${isNum(s.created) ? E(new Date(s.created).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })) : ""}</span></div>
       <div class="tl-d-stats">${stats.map(([k, v]) => `<div><span>${k}</span><b>${E(v)}</b></div>`).join("")}</div>`;
     if (!tl.length) {
       html += `<div class="tl-d-empty"><div class="tl-d-empty-g">${ic("flat")}</div><b>No request-level data for this session</b><span>Request timelines need api-log rows linked to the session (the Synaps telemetry PR adds <code>session_id</code>). The totals above come from the session file.</span></div>`;
@@ -864,10 +941,9 @@ const Telemetry = (() => {
       const comp = main.filter((r) => r.compaction).length;
       html += `<div class="tl-d-sec"><h4>Context growth <span>${int(main.length)} main requests${comp ? ` · ${comp} compaction${comp === 1 ? "" : "s"}` : ""}</span></h4><div class="tl-chart tl-d-ctx"></div></div>
         <div class="tl-d-sec"><h4>Cache hit per request <span>workers in a second colour</span></h4><div class="tl-chart tl-d-hit"></div></div>`;
-      const stops = {};
-      for (const r of tl) { const k = r.stop == null || r.stop === "none" ? "null" : r.stop; stops[k] = (stops[k] || 0) + 1; }
-      const BAD = { refusal: "bad", max_tokens: "warn", null: "warn" };
-      html += `<div class="tl-d-sec"><h4>Stop reasons</h4><div class="tl-chips">${Object.entries(stops).sort((a, b) => b[1] - a[1]).map(([k, n]) => `<span class="tl-chip2 ${BAD[k] || ""}"><b>${int(n)}</b> ${E(k === "null" ? "no stop reason" : k.replace(/_/g, " "))}</span>`).join("")}</div></div>`;
+      const stops = new Map();
+      for (const r of tl) { const k = stopKey(r.stop); stops.set(k, (stops.get(k) || 0) + 1); }
+      html += `<div class="tl-d-sec"><h4>Stop reasons</h4><div class="tl-chips">${[...stops].sort((a, b) => b[1] - a[1]).map(([k, n]) => `<span class="tl-chip2 ${STOP_FLAG.get(k) || ""}"><b>${int(n)}</b> ${E(stopLabel(k))}</span>`).join("")}</div></div>`;
     }
     html += `<div class="tl-d-sec"><h4>Workers <span>${int(wk.length)}</span></h4>${wk.length ? `<div class="tl-wk">${wk.map((w) => `<div class="tl-wk-r"><span class="tl-tag mono">${E(w.handle)}</span><span class="tl-agent">${E(w.agent)}</span><span class="mono dim">${E(shortModel(w.model))}</span><b>${usd(w.spend)}</b></div>`).join("")}</div>` : `<div class="tl-note">No subagents ran in this session.</div>`}</div>`;
     det.querySelector(".tl-d-body").innerHTML = html;
@@ -875,7 +951,8 @@ const Telemetry = (() => {
     const main = tl.filter((r) => !r.worker);
     const marks = main.map((r, i) => (r.compaction && i > 0 ? { i, label: "", cls: "warn", tip: `Compacted: ${num(main[i - 1].context_tokens)} → ${num(r.context_tokens)} (−${Math.round((1 - r.context_tokens / main[i - 1].context_tokens) * 100)}%)` } : null)).filter(Boolean);
     plot(det.querySelector(".tl-d-ctx"), lines({ n: main.length, label: (i) => `#${i + 1}`, head: (i) => `Request #${i + 1} · ${new Date(main[i].ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`, fmt: (v) => `${num(v)} tokens`, axis: num, lo: 0, H: 200, marks,
-      series: [{ label: "Context", vals: main.map((r) => r.context_tokens), c: 0 }] }));
+      series: [{ label: "Context", vals: main.map((r) => r.context_tokens), c: 0 }] }),
+      `Context growth over ${main.length} main requests, peak ${num(Math.max(...main.map((r) => r.context_tokens || 0)))} tokens, ${marks.length} compaction${marks.length === 1 ? "" : "s"}`);
     plot(det.querySelector(".tl-d-hit"), (W) => {
       const L = 50, R = 10, T = 8, B = 20, H = 120, n = tl.length, iw = W - L - R, ih = H - T - B, band = iw / n;
       const y = (v) => T + ih - (v / 100) * ih;
@@ -887,20 +964,25 @@ const Telemetry = (() => {
         if (i < 0 || i >= n) return null;
         const r = tl[i];
         return { g: `<rect class="tl-band" x="${f1(L + i * band)}" y="${T}" width="${f1(Math.max(band, 2))}" height="${ih}"/>`,
-          html: `<div class="tt-h">Request #${i + 1}${r.worker ? " · worker" : ""}</div>${tipRow(null, "Cache hit", pct(r.hit_pct))}${tipRow(null, "Context", `${num(r.context_tokens)} tokens`)}${tipRow(null, "Output", `${num(r.output)} tokens`)}${tipRow(null, "Total", ms(r.total_ms))}${tipRow(null, "TTFT", ms(r.ttft_ms))}${tipRow(null, "Stop", r.stop ?? "none")}${r.compaction ? `<div class="tt-note">compaction</div>` : ""}` };
+          html: `<div class="tl-tt-h">Request #${i + 1}${r.worker ? " · worker" : ""}</div>${tipRow(null, "Cache hit", pct(r.hit_pct))}${tipRow(null, "Context", `${num(r.context_tokens)} tokens`)}${tipRow(null, "Output", `${num(r.output)} tokens`)}${tipRow(null, "Total", ms(r.total_ms))}${tipRow(null, "TTFT", ms(r.ttft_ms))}${tipRow(null, "Stop", stopLabel(stopKey(r.stop)))}${r.compaction ? `<div class="tl-tt-note">compaction</div>` : ""}` };
       } };
-    });
+    }, `Cache hit per request, ${tl.length} requests, average ${pct(tl.filter((r) => isNum(r.hit_pct)).reduce((a, r, _, xs) => a + r.hit_pct / xs.length, 0))}`);
   }
-  function closeDetail() {
+  function closeDetail({ refocus = true } = {}) {
     if (!st.detail) return false;
     st.detail = null;
     st.detailData = null;
+    inflight.get("detail")?.abort(new DOMException("closed", "AbortError"));
+    behind().forEach((el) => (el.inert = false));
     hideTip();
     const a = anim(det, [{ transform: "none", opacity: 1 }, { transform: "translateX(24px)", opacity: 0 }], { duration: 200, easing: EASE.move });
     anim(scrim, [{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: EASE.move });
     const done = () => { if (!st.detail) { det.classList.add("hidden"); scrim.classList.add("hidden"); } };
     after(a, done, 200);
-    root.querySelector(`.tl-rows tr[data-id]:focus`)?.blur();
+    // back to the row that opened it (the table may have redrawn since: look it up by id)
+    const from = st.detailFrom;
+    st.detailFrom = null;
+    if (refocus) (from && [...root.querySelectorAll(".tl-rows tr[data-id]")].find((tr) => tr.dataset.id === from) || root).focus({ preventScroll: true });
     return true;
   }
 
@@ -918,7 +1000,13 @@ const Telemetry = (() => {
     curSec = k;
     const b = q(`.tl-tab[data-sec="${k}"]`);
     root.querySelectorAll(".tl-tab").forEach((x) => x.classList.toggle("on", x === b));
-    if (b) { ind.style.width = `${b.offsetWidth}px`; ind.style.transform = `translateX(${b.offsetLeft}px)`; }
+    if (!b) return;
+    ind.style.width = `${b.offsetWidth}px`;
+    ind.style.transform = `translateX(${b.offsetLeft}px)`;
+    // keep the active tab visible in a scrolled strip (scrollLeft, not scrollIntoView: that would move the page)
+    const t = b.parentElement;
+    if (b.offsetLeft < t.scrollLeft + 8 || b.offsetLeft + b.offsetWidth > t.scrollLeft + t.clientWidth - 8)
+      t.scrollTo({ left: Math.max(0, b.offsetLeft - (t.clientWidth - b.offsetWidth) / 2), behavior: motion() ? "smooth" : "auto" });
   }
   root.querySelectorAll(".tl-tab").forEach((b) => (b.onclick = () => {
     const sec = q(`.tl-sec[data-sec="${b.dataset.sec}"]`);
@@ -977,16 +1065,25 @@ const Telemetry = (() => {
     st.poll = setInterval(() => { if (st.open && !document.hidden) load("summary", true); }, 10000);
   }
   document.addEventListener("visibilitychange", () => { if (st.open && !document.hidden) load("summary", true); });
+  const isTlHash = () => location.hash === "#telemetry";
+  const sessionHash = () => (S.sid ? `#s=${S.sid}` : location.pathname + location.search);
   function open({ push = true } = {}) {
     if (st.open) return;
     st.open = true;
+    const a = document.activeElement;
+    st.opener = a && a !== document.body && !root.contains(a) ? a : null;
     closeDrawer();
-    if (push && !location.hash.startsWith("#telemetry")) { history.pushState(null, "", "#telemetry"); st.pushed = true; }
+    if ($("ctx-pop") && !$("ctx-pop").classList.contains("hidden")) { $("ctx-pop").classList.add("hidden"); $("st-ctx")?.setAttribute("aria-expanded", "false"); }
+    if (push && !isTlHash()) { history.pushState(null, "", "#telemetry"); st.pushed = true; }
     assignSeries();
     root.classList.remove("hidden");
     $("main").classList.add("tl-on");
     btn?.classList.add("on");
     btn?.setAttribute("aria-pressed", "true");
+    // focus moves INTO the view: the composer behind is hidden, and keys must not
+    // reach it (type-to-start would send a turn nobody can see); native keyboard
+    // scrolling then targets the view
+    root.focus({ preventScroll: true });
     anim(root, [{ opacity: 0, transform: "translateY(10px)" }, { opacity: 1, transform: "none" }], { duration: 380 });
     lastW = 0;
     requestAnimationFrame(() => { segs.forEach((s) => s._place()); curSec = null; markTab("live"); });
@@ -994,54 +1091,78 @@ const Telemetry = (() => {
     loadAll();
     poll();
   }
-  function close({ nav = true } = {}) {
+  function close({ nav = true, refocus = true } = {}) {
     if (!st.open) return;
     st.open = false;
+    st.escGuard = performance.now() + 300; // a fast extra Escape must not fall through and cancel the turn
     clearInterval(st.poll);
+    abortAll();
     hideTip();
-    closeDetail();
+    closeDetail({ refocus: false });
     $("main").classList.remove("tl-on");
     btn?.classList.remove("on");
     btn?.setAttribute("aria-pressed", "false");
     const a = anim(root, [{ opacity: 1 }, { opacity: 0, transform: "translateY(6px)" }], { duration: 200, easing: EASE.move });
     const done = () => { if (!st.open) root.classList.add("hidden"); };
     after(a, done, 200);
+    if (refocus) {
+      const o = st.opener;
+      (o?.isConnected && o.offsetParent !== null && !o.closest("[inert]") ? o : btn)?.focus({ preventScroll: true });
+    }
+    st.opener = null;
     if (!nav) return;
     if (st.pushed) { st.pushed = false; history.back(); }
-    else history.replaceState(null, "", S.sid ? `#s=${S.sid}` : location.pathname + location.search);
+    else history.replaceState(null, "", sessionHash());
   }
-  // leaving via the rail (pick a session / new session): the app sets the hash next
+  // leaving via the rail (pick a session / new session): pop our own entry, the app sets the hash next
   function leaveForRail() {
     if (!st.open) return;
+    const pushed = st.pushed;
     st.pushed = false;
-    history.replaceState(null, "", S.sid ? `#s=${S.sid}` : location.pathname + location.search);
-    close({ nav: false });
+    close({ nav: false, refocus: false });
+    if (pushed) history.back();
+    else history.replaceState(null, "", sessionHash());
   }
   btn?.addEventListener("click", () => (st.open ? close() : open()));
   q(".tl-close").onclick = () => close();
   q(".tl-rail").onclick = () => toggleRail();
   $("rail").addEventListener("click", (e) => { if (e.target.closest("li[data-id], #new-session")) leaveForRail(); }, true);
   addEventListener("popstate", () => {
-    const want = location.hash.startsWith("#telemetry");
-    if (want && !st.open) open({ push: false });
-    else if (!want && st.open) { st.pushed = false; close({ nav: false }); }
+    if (isTlHash() && !st.open) open({ push: false });
+    else if (!isTlHash() && st.open) { st.pushed = false; close({ nav: false }); }
   });
-  addEventListener("hashchange", () => { if (location.hash.startsWith("#telemetry") && !st.open) open({ push: false }); });
+  addEventListener("hashchange", () => { if (isTlHash() && !st.open) open({ push: false }); });
+  // Keyboard, while the view is open (capture phase, so the app's document
+  // handlers never see these keys): Escape closes detail → view; "/" focuses
+  // search (and types a "/" when already typing); navigation keys scroll the
+  // view natively instead of the hidden transcript.
+  const NAV = new Set(["PageUp", "PageDown", "ArrowUp", "ArrowDown", "Home", "End"]);
   document.addEventListener("keydown", (e) => {
-    if (!st.open) return;
-    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+    if (!st.open) {
+      if (e.key === "Escape" && performance.now() < (st.escGuard || 0)) e.stopImmediatePropagation();
+      return;
+    }
+    const ae = document.activeElement;
+    const typing = !!ae?.closest?.("input, textarea, select, [contenteditable]");
     if (e.key === "Escape") {
       if (S.prompt || (NARROW.matches && $("app").classList.contains("rail-open"))) return; // the app's: answer / close drawer
+      if (!$("settings").classList.contains("hidden")) return; // settings' own capture handler
       e.stopImmediatePropagation();
-      if (typing && document.activeElement === search && search.value) { search.value = ""; search.dispatchEvent(new Event("input")); return; }
+      if (typing && ae === search && search.value) { search.value = ""; search.dispatchEvent(new Event("input")); return; }
       if (!closeDetail()) close();
-    } else if (e.key === "/" && !typing) {
-      e.preventDefault();
+    } else if (e.key === "/") {
+      if (!root.contains(ae) && ae !== document.body && ae !== null) return; // e.g. settings is open
       e.stopImmediatePropagation();
-      search.focus();
+      if (typing || e.ctrlKey || e.metaKey || e.altKey) return; // a literal "/" in the box
+      e.preventDefault();
+      if (!st.detail) search.focus();
+    } else if (NAV.has(e.key) && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (ae && ae !== document.body && !root.contains(ae)) return;
+      e.stopImmediatePropagation(); // no preventDefault: the browser scrolls the focused view
+      if (!root.contains(ae)) root.focus({ preventScroll: true });
     }
   }, true);
-  if (location.hash.startsWith("#telemetry")) open({ push: false });
+  if (isTlHash()) open({ push: false });
 
   return { open, close, get isOpen() { return st.open; }, _st: st };
 })();

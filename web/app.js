@@ -2205,7 +2205,7 @@ function onAttached(a) {
   S.model = a.view?.model ?? a.meta.model;
   S.title = a.conversation?.header?.title || "";
   S.cur = null; S.localSubmit = null;
-  if (!location.hash.startsWith("#telemetry")) history.replaceState(null, "", `#s=${S.sid}`); // telemetry.js owns the hash while its view is open
+  if (location.hash !== "#telemetry") history.replaceState(null, "", `#s=${S.sid}`); // telemetry.js owns the hash while its view is open
   $("sess-title").textContent = S.title || S.sid;
   const chip = $("model-chip");
   chip.innerHTML = `${svg("cpu")}<span></span>`;

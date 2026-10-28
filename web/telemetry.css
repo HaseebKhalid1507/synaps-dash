@@ -1,5 +1,5 @@
 /* synaps·dash telemetry view (web/telemetry.js). Same glass, tokens and motion
-   vocabulary as style.css; series colours are palette tokens (tl-c0..c6), so
+   vocabulary as style.css; series colours are palette tokens (tl-c0..c5 + tl-cs/cw/ce), so
    every chart cross-fades with the album. */
 
 /* header entry (#top, right of the connection dot) */
@@ -104,7 +104,10 @@
 .tl-headline { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; font-size: 12.5px; color: var(--muted); }
 .tl-hl-v { font-size: 17px; font-weight: 650; letter-spacing: -.02em; color: var(--text); font-variant-numeric: tabular-nums; }
 .tl-hl-v.ok { color: var(--success); }
-.tl-hl-sep { opacity: .5; }
+.tl-hl-g { display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.tl-hl-g + .tl-hl-g::before { content: "·"; opacity: .5; margin-right: 2px; }
+.tl { outline: none; }
+.tl-d-body:focus { outline: none; }
 
 /* ── svg charts ── */
 .tl-svg { display: block; overflow: visible; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
@@ -152,14 +155,14 @@
   box-shadow: 0 18px 50px -16px rgba(0,0,0,.75); font-size: 12px; color: var(--text);
   opacity: 0; visibility: hidden; transition: opacity var(--fast), visibility 0s linear var(--fast); }
 .tl-tip.on { opacity: 1; visibility: visible; transition: opacity var(--fast), visibility 0s; }
-.tt-h { font-weight: 600; font-size: 11.5px; margin-bottom: 5px; color: color-mix(in oklab, var(--text) 85%, var(--muted)); }
-.tt-r { display: flex; align-items: center; gap: 8px; padding: 1.5px 0; }
-.tt-r i { width: 8px; height: 8px; border-radius: 2.5px; background: var(--c); flex: none; }
-.tt-r span { flex: 1; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tt-r b { font: 500 11.5px var(--mono); font-variant-numeric: tabular-nums; }
-.tt-r.tt-tot { margin-top: 3px; padding-top: 5px; border-top: 1px solid var(--line-soft); }
-.tt-r.tt-tot span { color: var(--text); }
-.tt-note { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--line-soft); font-size: 11px; color: var(--warning); }
+.tl-tt-h { font-weight: 600; font-size: 11.5px; margin-bottom: 5px; color: color-mix(in oklab, var(--text) 85%, var(--muted)); }
+.tl-tt-r { display: flex; align-items: center; gap: 8px; padding: 1.5px 0; }
+.tl-tt-r i { width: 8px; height: 8px; border-radius: 2.5px; background: var(--c); flex: none; }
+.tl-tt-r span { flex: 1; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tl-tt-r b { font: 500 11.5px var(--mono); font-variant-numeric: tabular-nums; }
+.tl-tt-r.tl-tt-tot { margin-top: 3px; padding-top: 5px; border-top: 1px solid var(--line-soft); }
+.tl-tt-r.tl-tt-tot span { color: var(--text); }
+.tl-tt-note { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--line-soft); font-size: 11px; color: var(--warning); }
 
 /* horizontal bars */
 .tl-hb { display: grid; gap: 11px; }
@@ -386,6 +389,8 @@
   .tl-detail { top: 0; right: 0; bottom: 0; width: 100%; border-radius: 0; border: 0; }
   .tl-d-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tl-usd { display: none; }
+  .tl-headline { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .tl-hl-g + .tl-hl-g::before { content: none; }
 }
 @media (max-width: 420px) {
   .tl-seg .seg-opt { padding: 4px 8px; }
