@@ -30,30 +30,26 @@
       {
         "key": "telemetry",
         "type": "string",
-        "description": "Telemetry store + /api/telemetry/* (on|off, default on). Reads local Synaps logs read-only; nothing leaves the machine.",
-        "required": false,
-        "default": "on"
+        "description": "Telemetry store + /api/telemetry/* (on|off). Unset = on for the default daemon, OFF for a profile daemon (sandbox, demo…); a profile needs telemetry = on in its own config. Reads local Synaps logs read-only; nothing leaves the machine.",
+        "required": false
       },
       {
         "key": "telemetry_db",
         "type": "string",
-        "description": "Telemetry SQLite path (default ~/.local/share/synaps-telemetry/telemetry.db).",
-        "required": false,
-        "default": ""
+        "description": "Telemetry SQLite path. Unset = ~/.local/share/synaps-telemetry/telemetry.db (telemetry-<profile>.db for a profile daemon, which never uses the default daemon's DB).",
+        "required": false
       },
       {
         "key": "telemetry_host",
         "type": "string",
-        "description": "Label for this machine's data in telemetry (default: the short hostname).",
-        "required": false,
-        "default": ""
+        "description": "Label for this machine's data in telemetry. Unset = the short hostname.",
+        "required": false
       },
       {
         "key": "telemetry_sources",
         "type": "string",
-        "description": "Extra read-only source roots, comma-separated host=path (e.g. jade=/path/to/snapshot).",
-        "required": false,
-        "default": ""
+        "description": "Extra read-only source roots, comma-separated host=path (e.g. jade=/path/to/snapshot). An entry named like telemetry_host replaces this daemon's own sources.",
+        "required": false
       }
     ]
   }

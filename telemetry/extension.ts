@@ -7,7 +7,7 @@
 // telemetry = on, and then it gets its own telemetry-<profile>.db and reads its
 // own <base>/<profile>/sessions — it never writes into the default store.
 
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir, hostname } from "node:os";
 import { openDb } from "./schema.ts";
 import { TelemetryQuery, type Live } from "./query.ts";
@@ -32,14 +32,28 @@ export function telemetryConfig(c: Record<string, unknown> | undefined, profile:
   const flag = s("telemetry").toLowerCase();
   const on = ["on", "true", "1", "yes", "enabled"].includes(flag);
   const off = ["off", "false", "0", "no", "disabled"].includes(flag);
+  // A profile daemon never writes the default daemon's store, even if a shared config
+  // (plugins/synaps-dash/config is shared by every profile) names it.
+  let dbPath = (s("telemetry_db") || defaultDbPath(profile)).replace(/^~(?=$|\/)/, homedir());
+  if (profile && resolve(dbPath) === resolve(defaultDbPath(null))) dbPath = defaultDbPath(profile);
   return {
+    // Unset (no manifest default, see plugin.json) → on for the default daemon only.
     enabled: profile ? on : !off,
-    dbPath: (s("telemetry_db") || defaultDbPath(profile)).replace(/^~(?=$|\/)/, homedir()),
+    dbPath,
     host: s("telemetry_host") || hostname().split(".")[0],
     sources: s("telemetry_sources"),
     profile,
     releasesRepo: join(homedir(), "Projects", "agent-runtime"),
   };
+}
+
+/** This daemon's own sources (profile-aware) + telemetry_sources. A telemetry_sources entry
+ *  named like telemetry_host REPLACES the own sources: that's how a sandbox/profile daemon is
+ *  pointed at the main data on purpose (telemetry_host = bella, telemetry_sources = bella=$HOME). */
+export function telemetryRoots(cfg: TelemetryConfig) {
+  const extra = parseSources(cfg.sources);
+  if (cfg.includeLocal === false || extra.some((r) => r.host === cfg.host)) return extra;
+  return [localRoot(cfg.host, cfg.profile ?? null), ...extra];
 }
 
 export type Telemetry = { query: TelemetryQuery | null; why: string | null; stop(): void; stats(): { spawns: number; restarts: number; lastDelay: number } };
@@ -55,8 +69,7 @@ export function startTelemetry(cfg: TelemetryConfig, log: (...a: unknown[]) => v
     log(`telemetry: cannot open ${cfg.dbPath}: ${e} — telemetry off`);
     return off(`telemetry store unavailable: ${String(e).slice(0, 200)}`);
   }
-  const extra = parseSources(cfg.sources);
-  const roots = cfg.includeLocal === false ? extra : [localRoot(cfg.host, cfg.profile ?? null), ...extra.filter((r) => r.host !== cfg.host)];
+  const roots = telemetryRoots(cfg);
   const staleMs = cfg.staleMs ?? 120_000, base = cfg.restartBaseMs ?? 5_000;
   let worker: Worker | null = null, stopped = false, restarts = 0, spawns = 0, lastDelay = 0, lastBeat = Date.now();
   let pending: ReturnType<typeof setTimeout> | null = null;
