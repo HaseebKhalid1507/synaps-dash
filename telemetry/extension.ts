@@ -1,6 +1,11 @@
 // Telemetry inside the synaps-dash extension: open the store, hand queries to
 // the HTTP layer, run ingest in a worker thread. Nothing here may throw into
 // the extension — any failure leaves telemetry disabled with a reason.
+//
+// Profiles: only the default daemon (profile null) has telemetry on by default.
+// A profile daemon (sandbox, demo…) stays off unless its plugin config says
+// telemetry = on, and then it gets its own telemetry-<profile>.db and reads its
+// own <base>/<profile>/sessions — it never writes into the default store.
 
 import { join } from "node:path";
 import { homedir, hostname } from "node:os";
@@ -8,62 +13,98 @@ import { openDb } from "./schema.ts";
 import { TelemetryQuery, type Live } from "./query.ts";
 import { localRoot, parseSources } from "./ingest.ts";
 
-export type TelemetryConfig = { enabled: boolean; dbPath: string; host: string; sources: string; intervalMs?: number; includeLocal?: boolean };
+export type TelemetryConfig = {
+  enabled: boolean; dbPath: string; host: string; sources: string; profile?: string | null;
+  intervalMs?: number; includeLocal?: boolean; releasesRepo?: string | null;
+  // test seams
+  workerUrl?: string; staleMs?: number; restartBaseMs?: number;
+};
 
-export function defaultDbPath(): string {
-  const data = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
-  return join(data, "synaps-telemetry", "telemetry.db");
+const dataDir = () => join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "synaps-telemetry");
+
+export function defaultDbPath(profile: string | null = null): string {
+  return join(dataDir(), profile ? `telemetry-${profile.replace(/[^\w.-]/g, "_")}.db` : "telemetry.db");
 }
 
-/** Plugin config (strings, as the daemon delivers them) → TelemetryConfig. */
-export function telemetryConfig(c: Record<string, unknown> | undefined): TelemetryConfig {
+/** Plugin config (strings, as the daemon delivers them) + the host daemon's profile → TelemetryConfig. */
+export function telemetryConfig(c: Record<string, unknown> | undefined, profile: string | null = null): TelemetryConfig {
   const s = (k: string) => (typeof c?.[k] === "string" ? (c[k] as string).trim() : "");
   const flag = s("telemetry").toLowerCase();
+  const on = ["on", "true", "1", "yes", "enabled"].includes(flag);
+  const off = ["off", "false", "0", "no", "disabled"].includes(flag);
   return {
-    enabled: !["off", "false", "0", "no", "disabled"].includes(flag),
-    dbPath: (s("telemetry_db") || defaultDbPath()).replace(/^~(?=$|\/)/, homedir()),
+    enabled: profile ? on : !off,
+    dbPath: (s("telemetry_db") || defaultDbPath(profile)).replace(/^~(?=$|\/)/, homedir()),
     host: s("telemetry_host") || hostname().split(".")[0],
     sources: s("telemetry_sources"),
+    profile,
+    releasesRepo: join(homedir(), "Projects", "agent-runtime"),
   };
 }
 
-export type Telemetry = { query: TelemetryQuery | null; why: string | null; stop(): void };
+export type Telemetry = { query: TelemetryQuery | null; why: string | null; stop(): void; stats(): { spawns: number; restarts: number; lastDelay: number } };
+
+const off = (why: string): Telemetry => ({ query: null, why, stop() {}, stats: () => ({ spawns: 0, restarts: 0, lastDelay: 0 }) });
 
 export function startTelemetry(cfg: TelemetryConfig, log: (...a: unknown[]) => void, live?: Live): Telemetry {
-  if (!cfg.enabled) return { query: null, why: "telemetry is disabled (plugin config telemetry = off)", stop() {} };
+  if (!cfg.enabled) return off(cfg.profile ? `telemetry is off for profile '${cfg.profile}' (set telemetry = on to enable)` : "telemetry is disabled (plugin config telemetry = off)");
   let query: TelemetryQuery;
   try {
     query = new TelemetryQuery(openDb(cfg.dbPath), { live });
   } catch (e) {
     log(`telemetry: cannot open ${cfg.dbPath}: ${e} — telemetry off`);
-    return { query: null, why: `telemetry store unavailable: ${String(e).slice(0, 200)}`, stop() {} };
+    return off(`telemetry store unavailable: ${String(e).slice(0, 200)}`);
   }
   const extra = parseSources(cfg.sources);
-  const roots = cfg.includeLocal === false ? extra : [localRoot(cfg.host), ...extra.filter((r) => r.host !== cfg.host)];
-  let worker: Worker | null = null, stopped = false, restarts = 0;
+  const roots = cfg.includeLocal === false ? extra : [localRoot(cfg.host, cfg.profile ?? null), ...extra.filter((r) => r.host !== cfg.host)];
+  const staleMs = cfg.staleMs ?? 120_000, base = cfg.restartBaseMs ?? 5_000;
+  let worker: Worker | null = null, stopped = false, restarts = 0, spawns = 0, lastDelay = 0, lastBeat = Date.now();
+  let pending: ReturnType<typeof setTimeout> | null = null;
+  const schedule = (why: string) => {
+    if (stopped || pending) return;
+    lastDelay = Math.min(300_000, base * 2 ** Math.min(restarts++, 6));
+    log(`telemetry: worker ${why} — restarting in ${lastDelay / 1000}s`);
+    pending = setTimeout(() => { pending = null; spawn(); }, lastDelay);
+  };
   const spawn = () => {
     if (stopped) return;
     try {
-      worker = new Worker(new URL("./worker.ts", import.meta.url).href);
-      worker.addEventListener("message", (e: MessageEvent) => {
+      const w = new Worker(cfg.workerUrl ?? new URL("./worker.ts", import.meta.url).href);
+      worker = w;
+      spawns++;
+      lastBeat = Date.now();
+      w.addEventListener("message", (e: MessageEvent) => {
         const m = e.data;
-        if (m?.type === "error") log(`telemetry: ingest pass failed: ${m.error}`);
-        else if (m?.type === "pass" && (m.stats.ms > 2000 || m.stats.errors)) log(`telemetry: ingest ${JSON.stringify(m.stats)}`);
+        lastBeat = Date.now();
+        if (m?.type === "pass") {
+          restarts = 0; // healthy again: the next failure backs off from the start
+          if (m.stats.ms > 2000 || m.stats.errors) log(`telemetry: ingest ${JSON.stringify(m.stats)}`);
+        } else if (m?.type === "error") log(`telemetry: ingest pass failed: ${m.error}`);
       });
-      worker.addEventListener("error", (e: any) => log(`telemetry: worker error: ${e?.message ?? e}`));
-      worker.addEventListener("close", () => {
-        worker = null;
-        if (stopped) return;
-        const wait = Math.min(300_000, 5_000 * 2 ** Math.min(restarts++, 6));
-        log(`telemetry: worker exited — restarting in ${wait / 1000}s`);
-        setTimeout(spawn, wait);
+      w.addEventListener("error", (e: any) => log(`telemetry: worker error: ${e?.message ?? e}`));
+      w.addEventListener("close", () => {
+        if (worker === w) worker = null;
+        schedule("exited");
       });
-      worker.postMessage({ dbPath: cfg.dbPath, roots, intervalMs: cfg.intervalMs ?? 5000 });
+      w.postMessage({ dbPath: cfg.dbPath, roots, intervalMs: cfg.intervalMs ?? 5000, releasesRepo: cfg.releasesRepo ?? null });
     } catch (e) {
       log(`telemetry: cannot start ingest worker: ${e}`);
+      schedule("failed to start");
     }
   };
+  // Watchdog: a worker that stops beating (wedged on I/O, stuck loop) is replaced.
+  const dog = setInterval(() => {
+    if (stopped || !worker || Date.now() - lastBeat < staleMs) return;
+    const w = worker;
+    worker = null;
+    try { w.terminate(); } catch {}
+    schedule(`silent for ${Math.round((Date.now() - lastBeat) / 1000)}s`);
+  }, Math.min(15_000, Math.max(10, staleMs / 4)));
   spawn();
   log(`telemetry: ${cfg.dbPath} ← ${roots.map((r) => `${r.host}:${r.root}`).join(", ")}`);
-  return { query, why: null, stop() { stopped = true; try { worker?.terminate(); } catch {} } };
+  return {
+    query, why: null,
+    stop() { stopped = true; clearInterval(dog); if (pending) clearTimeout(pending); try { worker?.terminate(); } catch {} },
+    stats: () => ({ spawns, restarts, lastDelay }),
+  };
 }
