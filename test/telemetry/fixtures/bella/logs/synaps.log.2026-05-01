@@ -1,0 +1,4 @@
+2026-05-01T14:00:01.123456Z INFO ThreadId(02) starting
+2026-05-01T14:00:05.000001Z DEBUG ThreadId(16) Token Usage: 10 input | 145 output | 9000 cache_read | 1000 cache_create
+noise line
+2026-05-01T14:10:05.5Z DEBUG ThreadId(16) Token Usage: 5 input | 50 output | 0 cache_read | 3287 cache_create

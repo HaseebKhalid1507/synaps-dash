@@ -1,0 +1,1 @@
+{"version":1,"handle_id":"sa_1","meta":{"agent_name":"spike","model":"anthropic/claude-opus-5-5","system_prompt":"You are Spike","timeout_secs":60},"status":"completed","output":"done","history":[{"role":"user","content":"go"}]}
