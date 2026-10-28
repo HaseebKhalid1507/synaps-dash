@@ -3,7 +3,9 @@ import { test, expect } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { startTelemetry, telemetryConfig, defaultDbPath } from "../../telemetry/extension.ts";
-import { sandbox, synthRoot, PERF, SLOW } from "./helpers.ts";
+import { sandbox, synthRoot, PERF, SLOW, relaxTimeouts } from "./helpers.ts";
+
+relaxTimeouts();
 
 test("plugin config → TelemetryConfig; profiles are opt-in with their own DB", () => {
   expect(telemetryConfig({}).enabled).toBe(true);

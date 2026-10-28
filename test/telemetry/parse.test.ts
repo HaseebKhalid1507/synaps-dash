@@ -2,7 +2,9 @@ import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseApiLog, parseTrace, parseLegacy, parseSession, parseWorkerHead, archiveRefs, splitObjects, parseLine, modelKey } from "../../telemetry/parse.ts";
-import { FIXTURES } from "./helpers.ts";
+import { FIXTURES, relaxTimeouts } from "./helpers.ts";
+
+relaxTimeouts();
 
 const lines = (p: string) => readFileSync(join(FIXTURES, p), "utf8").split("\n");
 

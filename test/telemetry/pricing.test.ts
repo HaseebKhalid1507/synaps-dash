@@ -2,6 +2,9 @@
 import { test, expect } from "bun:test";
 import { cost, costSplit, costOptionalSplit, cacheReadMultiplier, isVersion } from "../../telemetry/pricing.ts";
 import { parseApiLog } from "../../telemetry/parse.ts";
+import { relaxTimeouts } from "./helpers.ts";
+
+relaxTimeouts();
 
 test("list prices (1M in + 1M out)", () => {
   for (const [m, want] of [

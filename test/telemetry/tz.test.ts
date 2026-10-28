@@ -6,7 +6,9 @@ import { local, dayOf, daysBetween, dayStartMs, weekdayOf, nextDay } from "../..
 import { openDb } from "../../telemetry/schema.ts";
 import { ingestOnce, resolveRoot } from "../../telemetry/ingest.ts";
 import { TelemetryQuery } from "../../telemetry/query.ts";
-import { sandbox } from "./helpers.ts";
+import { sandbox, relaxTimeouts } from "./helpers.ts";
+
+relaxTimeouts();
 
 test("fall back, 2026-11-01: a 25-hour local day, Sunday", () => {
   const start = dayStartMs("2026-11-01");

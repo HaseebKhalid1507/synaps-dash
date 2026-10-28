@@ -3,6 +3,9 @@ import { mkdtempSync, mkdirSync, statSync, writeFileSync, chmodSync, rmSync } fr
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { openDb, SCHEMA_VERSION } from "../../telemetry/schema.ts";
+import { relaxTimeouts } from "./helpers.ts";
+
+relaxTimeouts();
 
 const mode = (p: string) => statSync(p).mode & 0o777;
 

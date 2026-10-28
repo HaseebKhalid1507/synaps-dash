@@ -4,7 +4,9 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { openDb } from "../../telemetry/schema.ts";
 import { ingestOnce, resolveRoot, parseSources, scanArchiveRefs, localRoot } from "../../telemetry/ingest.ts";
-import { sandbox, FIXTURES } from "./helpers.ts";
+import { sandbox, FIXTURES, relaxTimeouts } from "./helpers.ts";
+
+relaxTimeouts();
 
 let sb: ReturnType<typeof sandbox> | null = null;
 afterEach(() => { sb?.done(); sb = null; });

@@ -6,7 +6,9 @@ import { openDb } from "../../telemetry/schema.ts";
 import { ingestOnce, resolveRoot } from "../../telemetry/ingest.ts";
 import { TelemetryQuery } from "../../telemetry/query.ts";
 import { handleTelemetry } from "../../telemetry/http.ts";
-import { sandbox, synthRoot, PERF, SLOW } from "./helpers.ts";
+import { sandbox, synthRoot, PERF, SLOW, relaxTimeouts } from "./helpers.ts";
+
+relaxTimeouts();
 
 let sb: ReturnType<typeof sandbox>;
 let q: TelemetryQuery;

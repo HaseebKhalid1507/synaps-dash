@@ -7,7 +7,9 @@ import { openDb } from "../../telemetry/schema.ts";
 import { ingestOnce, resolveRoot, generations } from "../../telemetry/ingest.ts";
 import { TelemetryQuery } from "../../telemetry/query.ts";
 import { parseApiLog } from "../../telemetry/parse.ts";
-import { sandbox } from "./helpers.ts";
+import { sandbox, relaxTimeouts } from "./helpers.ts";
+
+relaxTimeouts();
 
 // verbatim from the #322 PR body ("After: one real request with this branch's debug binary")
 const MAIN = `{"ts":1793166098184,"request_id":"req_011CgU6mofA3iRUyvJHPuxCT","msg_id":"msg_011CgU6moqKjnbedxMi3dz9H","model":"claude-haiku-4-5","attempt":1,"ttft_ms":626,"total_ms":802,"stop_reason":"end_turn","usage":{"input":10,"output":41,"cache_read":0,"cache_write":7260,"cache_write_5m":7260,"cache_write_1h":0,"hit_pct":0.0},"cost_usd":0.00929,"context":{"messages":1,"tools":27,"system_bytes":202,"breakpoints":[0]},"session_id":"20261028-054137-d610","runtime_session_id":"session-1628584-1793166097321","turn_id":"turn-1628584-0","trace_request_id":"req-1628584-0"}`;

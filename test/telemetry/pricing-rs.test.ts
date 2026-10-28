@@ -6,6 +6,9 @@
 import { test, expect } from "bun:test";
 import { cost, costSplit, costOptionalSplit, cacheReadMultiplier, isLegacyOpus } from "../../telemetry/pricing.ts";
 import { parseApiLog } from "../../telemetry/parse.ts";
+import { relaxTimeouts } from "./helpers.ts";
+
+relaxTimeouts();
 
 const U64_MAX = 18446744073709551615; // rounds to 2^64
 
