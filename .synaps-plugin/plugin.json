@@ -26,6 +26,34 @@
         "description": "Loopback port for the synaps·dash web UI (default 7717).",
         "required": false,
         "default": "7717"
+      },
+      {
+        "key": "telemetry",
+        "type": "string",
+        "description": "Telemetry store + /api/telemetry/* (on|off, default on). Reads local Synaps logs read-only; nothing leaves the machine.",
+        "required": false,
+        "default": "on"
+      },
+      {
+        "key": "telemetry_db",
+        "type": "string",
+        "description": "Telemetry SQLite path (default ~/.local/share/synaps-telemetry/telemetry.db).",
+        "required": false,
+        "default": ""
+      },
+      {
+        "key": "telemetry_host",
+        "type": "string",
+        "description": "Label for this machine's data in telemetry (default: the short hostname).",
+        "required": false,
+        "default": ""
+      },
+      {
+        "key": "telemetry_sources",
+        "type": "string",
+        "description": "Extra read-only source roots, comma-separated host=path (e.g. jade=/path/to/snapshot).",
+        "required": false,
+        "default": ""
       }
     ]
   }
