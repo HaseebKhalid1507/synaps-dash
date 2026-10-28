@@ -55,6 +55,7 @@ function mock(ctx, opts = {}) {
     log.push({ ep, name, q: Object.fromEntries(u.searchParams), at: Date.now() });
     const json = (body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
     if (fails.has(name)) return json({ error: opts.xss || "boom" }, 500);
+    if (opts.hang?.has(name)) return; // never fulfilled: a store that hangs
     const from = Number(u.searchParams.get("from")) || 0;
     const keep = (arr) => (from ? arr.slice(-Math.ceil((Date.now() - from) / DAY)) : arr); // fixtures end "today"
     const out = (body) => json(opts.xss ? xssify(name, body, opts.xss) : body);
@@ -70,7 +71,7 @@ function mock(ctx, opts = {}) {
       case "cache": { const d = fx("cache.json"); d.daily = keep(d.daily); return out(d); }
       case "latency": { const d = fx("latency.json"); d.daily = keep(d.daily); return out(d); }
       case "heatmap": return out(fx("heatmap.json"));
-      case "health": return out(fx("health.json"));
+      case "health": { const d = fx("health.json"); d.ingest.last_run = Date.now() - 94000; return out(d); } // relative: "healthy" must not expire an hour after generation
       case "sessions": {
         const key = { cost: "spend", updated: "updated", requests: "requests" }[u.searchParams.get("sort") || "cost"];
         const q = (u.searchParams.get("q") || "").toLowerCase();
@@ -219,7 +220,7 @@ async function real(page, b) {
   expect("desktop: no horizontal overflow", s.overflowX <= 0, s.overflowX);
   expect("health: ingest status", /healthy/.test(s.ingest) && /took 1\.8 s/.test(s.ingest) && /158/.test(s.skipped) && /bad lines\s*3/.test(s.skipped), s);
   s = await d.evaluate(() => [...document.querySelectorAll("#telemetry .tl-host .seg-opt")].map((b) => b.textContent));
-  expect("host filter built from the store's sources (+ unknown)", s.join() === "All hosts,bella,jade,unknown", s);
+  expect("host filter built from the store's sources", /^All hosts,bella,jade(,unknown)?$/.test(s.join()), s);
   const first = d.log.filter((r) => r.at >= t0);
   expect("no NaN/undefined/Infinity/[object in the rendered view", !(await garbage(d)), await garbage(d));
   s = await d.evaluate(() => ({ imgs: [...document.querySelectorAll("#telemetry svg[role=img]")].map((x) => x.getAttribute("aria-label")), heat: document.querySelector("#telemetry .tl-heat")?.getAttribute("aria-label") }));
@@ -233,7 +234,8 @@ async function real(page, b) {
   let bx = await d.locator("#telemetry [data-p=spend] svg").boundingBox();
   await d.mouse.move(bx.x + bx.width * 0.6, bx.y + bx.height / 2);
   s = await d.evaluate(() => ({ on: document.querySelector(".tl-tip").classList.contains("on"), text: document.querySelector(".tl-tip").textContent, band: !!document.querySelector("#telemetry [data-p=spend] .tl-hov .tl-band") }));
-  expect("tooltip: spend hover shows the day's breakdown + total", s.on && /Total/.test(s.text) && /opus/.test(s.text) && s.band, s);
+  s.totStyled = await d.evaluate(() => { const t = document.querySelector(".tl-tip .tl-tt-tot"); return !!t && getComputedStyle(t).borderTopStyle === "solid"; });
+  expect("tooltip: spend hover shows the day's breakdown + total", s.on && /Total/.test(s.text) && /opus/.test(s.text) && s.band && s.totStyled, s);
   if (SHOTS) await d.screenshot({ path: path.join(SHOTS, "desktop-tooltip-spend.png"), clip: { x: bx.x - 20, y: bx.y - 80, width: bx.width + 40, height: bx.height + 160 } });
   await d.mouse.move(5, 5);
   expect("tooltip hides on leave", !(await d.evaluate(() => document.querySelector(".tl-tip").classList.contains("on"))));
@@ -267,6 +269,8 @@ async function real(page, b) {
   await settled(d);
   s = await d.evaluate(() => document.querySelector("#telemetry [data-p=spend] .tl-legend").textContent);
   expect("group: host (incl. its own unknown series)", /bella/.test(s) && /jade/.test(s) && /unknown host/.test(s), s);
+  s = await d.evaluate(() => [...document.querySelectorAll("#telemetry .tl-host .seg-opt")].map((b) => b.textContent).join());
+  expect("unknown host chip appears once the data has an unknown host", s === "All hosts,bella,jade,unknown", s);
   await rangeClick("30d");
 
   // sessions: sort, paging, search, drill-down
@@ -331,16 +335,37 @@ async function real(page, b) {
   // ── keyboard contract (B1/S1) ──
   expect("open: focus moves into the view (not the hidden composer)", focusAtOpen);
   await d.fill("#telemetry .tl-search input", ""); await settled(d);
-  await d.evaluate(() => { const R = document.getElementById("telemetry"); R.scrollTop = 0; R.focus(); window.__sc0 = document.getElementById("scroller").scrollTop; });
+  // the transcript must be scrollable, or "it didn't move" proves nothing
+  s = await d.evaluate(() => {
+    const T = document.getElementById("thread"), SC = document.getElementById("scroller");
+    S.pinned = false; // else the app's growth observer glues the padded transcript to the bottom by itself
+    if (SC.scrollHeight <= SC.clientHeight + 200) { const pad = document.createElement("div"); pad.id = "__pad"; pad.style.height = "4000px"; T.append(pad); }
+    SC.scrollTop = 0;
+    const R = document.getElementById("telemetry"); R.scrollTop = 0;
+    document.activeElement?.blur(); // keys arrive with focus on <body>: the case the app's handlers grab
+    window.__sc0 = SC.scrollTop;
+    return { scrollable: SC.scrollHeight > SC.clientHeight + 200, focus: document.activeElement === document.body };
+  });
+  await d.waitForTimeout(300);
+  await d.evaluate(() => { document.getElementById("scroller").scrollTop = 0; window.__sc0 = 0; document.activeElement?.blur(); });
+  expect("precondition: #scroller can scroll, focus on <body>", s.scrollable && s.focus, s);
   await d.keyboard.press("PageDown"); await d.waitForTimeout(500);
   s = await d.evaluate(() => ({ view: document.getElementById("telemetry").scrollTop, scroller: document.getElementById("scroller").scrollTop, was: window.__sc0 }));
   expect("PageDown scrolls the view, not #scroller", s.view > 100 && s.scroller === s.was, s);
   await d.keyboard.press("End"); await d.waitForTimeout(500);
   s = await d.evaluate(() => ({ view: document.getElementById("telemetry").scrollTop, max: document.getElementById("telemetry").scrollHeight - document.getElementById("telemetry").clientHeight, scroller: document.getElementById("scroller").scrollTop, was: window.__sc0 }));
   expect("End scrolls the view to the bottom, transcript untouched", s.view >= s.max - 4 && s.scroller === s.was, s);
+  // from a focused rail button too (the app's nav handler would scroll the transcript)
+  await d.evaluate(() => { document.getElementById("telemetry").scrollTop = 0; document.getElementById("new-session").focus(); });
+  await d.keyboard.press("PageDown"); await d.waitForTimeout(400);
+  s = await d.evaluate(() => ({ scroller: document.getElementById("scroller").scrollTop, was: window.__sc0 }));
+  expect("nav key from a focused rail element: transcript untouched", s.scroller === s.was, s);
+  // "/" as the session OWNER: the app's own "/" handler (focus the composer) only fires for the owner
+  await d.evaluate(() => { window.__own = { me: S.me, owner: S.owner }; S.me = 1; S.owner = 1; document.getElementById("telemetry").focus(); });
   await d.keyboard.press("/");
   await d.keyboard.type("a/b");
   s = await d.evaluate(() => ({ v: document.querySelector("#telemetry .tl-search input").value, input: document.getElementById("input").value }));
+  await d.evaluate(() => { S.me = window.__own.me; S.owner = window.__own.owner; document.getElementById("__pad")?.remove(); });
   expect('"/" focuses search, and types a literal "/" inside it', s.v === "a/b" && !s.input.includes("a/b"), s);
   await d.keyboard.press("Escape"); // clears the box first
   await d.waitForTimeout(400);
@@ -428,6 +453,15 @@ async function real(page, b) {
   expect("20 cycles: no orphaned poll timers", count(k, "summary") === n0, { n0, n1: count(k, "summary") });
 
   expect("clock page: no page errors", k.errs.length === 0, k.errs);
+  // S6: a hung endpoint times out at 15s into an error panel; the others are fine
+  const hg = await page({ clock: true, hang: new Set(["cache"]) });
+  await hg.click("#open-telemetry");
+  await hg.waitForFunction(() => !document.querySelector('#telemetry [data-p="spend"]').classList.contains("is-loading"), null, { timeout: 10000 });
+  s = await hg.evaluate(() => document.querySelector('#telemetry [data-p="hit"]').classList.contains("is-loading"));
+  await hg.clock.fastForward(15100); await hg.waitForTimeout(300);
+  s = { before: s, ...(await hg.evaluate(() => ({ err: document.querySelector('#telemetry [data-p="hit"] .tl-err span')?.textContent || null, spend: document.querySelector('#telemetry [data-p="spend"]').classList.contains("is-err") }))) };
+  expect("S6: hung /cache → 'timed out' panel after 15s, others unaffected", s.before && /cache — timed out after 15s/.test(s.err || "") && !s.spend, s);
+  await hg.context().close();
   await k.context().close();
 
   // back button + deep link
@@ -503,11 +537,11 @@ async function real(page, b) {
   expect("XSS page: no garbage text, no page errors", !(await garbage(x)) && x.errs.length === 0, { g: await garbage(x), e: x.errs });
 
   // ── small-$ axes (S4) ──
-  for (const max of [0.37, 9]) {
+  for (const max of [0.37, 9, 1.2e6]) {
     const a = await page({ spendMax: max });
     await a.click("#open-telemetry"); await settled(a);
     const labels = await a.evaluate(() => [...document.querySelectorAll("#telemetry [data-p=spend] svg text.tl-ax")].filter((t) => t.getAttribute("text-anchor") === "end" && /^\$/.test(t.textContent)).map((t) => t.textContent));
-    expect(`axis with a $${max} max: distinct, honest labels`, labels.length >= 3 && new Set(labels).size === labels.length && labels.some((l) => l !== "$0"), labels);
+    expect(`axis with a $${max} max: distinct, honest labels`, labels.length >= 3 && new Set(labels).size === labels.length && labels.some((l) => l !== "$0") && (max < 1e6 || (labels.some((l) => /^\$[\d.]+M$/.test(l)) && !labels.some((l) => /\d{4}K/.test(l)))), labels);
     console.log(`  axis @ $${max}:`, labels.join(" "));
     await a.context().close();
   }

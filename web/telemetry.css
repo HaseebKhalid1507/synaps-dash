@@ -369,8 +369,7 @@
   .tl-pulse-t { display: none; }
   .tl-body { padding: 4px 12px 28px; }
   .tl-sub { gap: 8px; }
-  .tl-filters { width: 100%; justify-content: space-between; overflow-x: auto; scrollbar-width: none; }
-  .tl-sec { scroll-margin-top: 140px; margin-bottom: 26px; }
+  .tl-sec { scroll-margin-top: 184px; margin-bottom: 26px; } /* ≈ the wrapped sticky header */
   .tl-card { padding: 14px 12px; border-radius: 14px; }
   .tl-grid { gap: 10px; }
   .tl-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
@@ -391,7 +390,7 @@
   .tl-usd { display: none; }
   .tl-sec-h { flex-direction: column; align-items: flex-start; gap: 6px; }
   .tl-headline { flex-direction: column; align-items: flex-start; gap: 2px; }
-  .tl-filters { flex-wrap: wrap; overflow: visible; justify-content: flex-start; gap: 6px; }
+  .tl-filters { width: 100%; flex-wrap: wrap; justify-content: flex-start; gap: 6px; }
   .tl-hl-g + .tl-hl-g::before { content: none; }
 }
 @media (max-width: 420px) {

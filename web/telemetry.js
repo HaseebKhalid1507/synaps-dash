@@ -39,6 +39,7 @@ const Telemetry = (() => {
   const decimals = (x) => { const t = String(+(+x).toPrecision(6)); return t.includes("e-") ? +t.split("e-")[1] : (t.split(".")[1] || "").length; };
   function usdAxis(v, step = v) {
     if (v === 0) return "$0";
+    if (v >= 1e6) return `$${+(v / 1e6).toFixed(decimals(step / 1e6))}M`;
     if (v >= 1000) return step >= 100 ? `$${+(v / 1000).toFixed(decimals(step / 1000))}K` : `$${Math.round(v).toLocaleString()}`;
     const d = decimals(step);
     return `$${v.toFixed(d === 0 ? 0 : Math.max(2, d))}`;
@@ -134,7 +135,7 @@ const Telemetry = (() => {
     const step = ticks.length > 1 ? ticks[1] - ticks[0] : ticks[0] || 1;
     return ticks.map((t) => `<line class="tl-gl" x1="${L}" x2="${W}" y1="${f1(y(t))}" y2="${f1(y(t))}"/><text class="tl-ax" x="${L - 8}" y="${f1(y(t)) + 3.5}" text-anchor="end">${E(fmt(t, step))}</text>`).join("");
   }
-  const tipRow = (cls, k, v, strong) => `<div class="tl-tt-r${strong ? " tt-tot" : ""}">${cls != null ? `<i class="tl-c${cls}"></i>` : ""}<span>${E(k)}</span><b>${E(v)}</b></div>`;
+  const tipRow = (cls, k, v, strong) => `<div class="tl-tt-r${strong ? " tl-tt-tot" : ""}">${cls != null ? `<i class="tl-c${cls}"></i>` : ""}<span>${E(k)}</span><b>${E(v)}</b></div>`;
 
   // Stacked $ (or tokens) per day. ≤ 62 days: bars; beyond: stacked areas.
   function stack({ days, series, fmt, axis, H = 250, marker }) {
@@ -484,6 +485,8 @@ const Telemetry = (() => {
     const muted = oklab(cs.getPropertyValue("--muted"));
     if (muted) pool.push({ css: "var(--muted)", lab: muted });
     const usable = pool.filter((c) => Math.abs(c.lab[0] - bg[0]) > 0.16); // never near-invisible on the background
+    const clear = (from) => { for (let i = from; i < 6; i++) root.style.removeProperty(`--s${i}`); }; // → token fallbacks in telemetry.css
+    if (!usable.length) { clear(0); delete root.dataset.series; return; }
     const out = [usable.shift()];
     while (out.length < 6 && usable.length) {
       let bi = 0, bs = -1;
@@ -491,6 +494,7 @@ const Telemetry = (() => {
       out.push(usable.splice(bi, 1)[0]);
     }
     out.forEach((c, i) => root.style.setProperty(`--s${i}`, c.css));
+    clear(out.length); // no stale picks from the previous album
     root.dataset.series = out.map((c) => c.lab.map((v) => v.toFixed(3)).join(",")).join(" "); // test hook: picked colours
   }
   let palT = 0;
@@ -507,9 +511,12 @@ const Telemetry = (() => {
   // hosts come from the store (health.ingest.sources), not a hardcoded list
   // + "unknown": sessions whose origin host the store couldn't decide are a
   // filter value of their own (and a spend?group=host series)
+  let srcHosts = [], sawUnknown = false;
+  const noteUnknown = (has) => { if (has && !sawUnknown) { sawUnknown = true; setHosts(srcHosts); } };
   function setHosts(list) {
+    srcHosts = list;
     list = list.filter((x) => x !== "unknown").sort();
-    if (list.length >= 2) list.push("unknown");
+    if (sawUnknown || srcHosts.includes("unknown") || st.host === "unknown") list.push("unknown"); // only once the data has one
     if (list.join() === hosts.join()) return;
     hosts = list;
     const next = seg([["", "All hosts"], ...list.map((x) => [x, x === "unknown" ? "unknown" : x])], st.host, pickHost, "Host");
@@ -698,6 +705,7 @@ const Telemetry = (() => {
       }
       const label = (k) => (k === "__other" ? `Other (${ser.find((x) => x.key === k).n})` : d.group === "role" ? (k === "main" ? "Main sessions" : k === "worker" ? "Workers" : k) : d.group === "model" ? shortModel(k) : k === "unknown" ? "unknown host" : k);
       ser.forEach((s, i) => { s.c = i % 6; s.label = label(s.key); });
+      noteUnknown(d.group === "host" && ser.some((x) => x.key === "unknown"));
       const sw = (d.grain || []).find((g) => g[1] === "request");
       const marker = sw ? { day: sw[0], left: "session-level", right: "request-level →", allBefore: true } : null;
       const total = ser.reduce((a, s) => a + s.tot, 0);
@@ -811,6 +819,7 @@ const Telemetry = (() => {
     sessions(box) {
       const d = st.data.sessions;
       const rows = d?.rows || [];
+      noteUnknown(rows.some((r) => r.host === "unknown"));
       const COLS = [["title", "Session"], ["host", "Host", "hide-sm"], ["model", "Model", "hide-md"], ["requests", "Requests", "num", "requests"], ["spend", "Spend", "num", "cost"],
         ["hit", "Hit", "num hide-sm"], ["ctx", "Peak ctx", "num hide-md"], ["workers", "Workers", "num hide-md"], ["updated", "Updated", "num", "updated"]];
       const total = isNum(d?.total) ? d.total : rows.length;
@@ -910,7 +919,7 @@ const Telemetry = (() => {
   const det = q(".tl-detail"), scrim = q(".tl-scrim");
   scrim.onclick = () => closeDetail();
   // the detail is modal: everything behind the scrim goes inert while it's open
-  const behind = () => [q(".tl-head"), body];
+  const behind = () => [q(".tl-head"), body, $("rail")]; // the rail too: aria-modal must hold for Shift+Tab
   async function openDetail(id) {
     hideTip();
     if (!st.detail) st.detailFrom = id; // the row to hand focus back to
@@ -1129,7 +1138,7 @@ const Telemetry = (() => {
     const pushed = st.pushed;
     st.pushed = false;
     close({ nav: false, refocus: false });
-    if (pushed) history.back();
+    if (pushed) { st.leaving = true; history.back(); }
     else history.replaceState(null, "", sessionHash());
   }
   btn?.addEventListener("click", () => (st.open ? close() : open()));
@@ -1137,6 +1146,9 @@ const Telemetry = (() => {
   q(".tl-rail").onclick = () => toggleRail();
   $("rail").addEventListener("click", (e) => { if (e.target.closest("li[data-id], #new-session")) leaveForRail(); }, true);
   addEventListener("popstate", () => {
+    // back() from leaveForRail lands after the new session may already have
+    // attached (its replaceState skipped while we still showed #telemetry)
+    if (st.leaving) { st.leaving = false; if (S.sid && location.hash !== `#s=${S.sid}`) history.replaceState(null, "", `#s=${S.sid}`); return; }
     if (isTlHash() && !st.open) open({ push: false });
     else if (!isTlHash() && st.open) { st.pushed = false; close({ nav: false }); }
   });
@@ -1166,9 +1178,9 @@ const Telemetry = (() => {
       e.preventDefault();
       if (!st.detail) search.focus();
     } else if (NAV.has(e.key) && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      if (ae && ae !== document.body && !root.contains(ae)) return;
-      e.stopImmediatePropagation(); // no preventDefault: the browser scrolls the focused view
-      if (!root.contains(ae)) root.focus({ preventScroll: true });
+      if (S.prompt || !$("settings").classList.contains("hidden")) return; // dialogs above the view scroll themselves
+      e.stopImmediatePropagation(); // from anywhere (the rail too): never the hidden transcript. No preventDefault: native scroll
+      if (!ae || ae === document.body) root.focus({ preventScroll: true });
     }
   }, true);
   if (isTlHash()) open({ push: false });
