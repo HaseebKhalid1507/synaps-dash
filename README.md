@@ -172,10 +172,63 @@ The daemon trusts its uid (0600 socket), so **this process is the boundary**:
   default config)
 - `/api/sessions` returns session headers only (id, title, model, times, cost, message count):
   never messages, system prompts or env
+- `/api/telemetry/*` is GET-only and returns aggregates and session headers (ids, titles,
+  token counts, costs, timings). Never messages, prompts, env or tool output. The store
+  reads Synaps' logs read-only and keeps its own SQLite file; nothing is sent anywhere
 - `attach create` config is sanitised (no `prompt_manifest`/`env`; `auto_approve_confirms=false`)
 - `shutdown` / `reload` / `purge` / `hello` / `end` are refused
 - serves only when hosted by a registered daemon (its `daemon*.json` pid == our ppid).
   An in-process Synaps that also loads the plugin stays dormant.
+
+## Telemetry
+
+The bridge also keeps a local telemetry store: what you spent, per day, model, host and
+agent; how well the prompt cache held; how fast the provider answered. It's built from the
+logs Synaps already writes. Nothing new gets logged, nothing leaves the machine.
+
+**What it reads (read-only: opened, read, closed; never written, moved, truncated or locked)**
+
+| Source | Gives |
+|---|---|
+| `~/.cache/synaps/api-log.jsonl` (+ `.1`) | one row per provider request: model, tokens, cache TTL split, timings, stop reason, worker/keep-warm flags, cache-miss reason |
+| `~/.cache/synaps/request-trace.jsonl` (+ `.1`) | per-request timings (headers, first model event, stream end), retries, wire size. Joined on the provider request id |
+| `~/.synaps-cli/sessions/*.json` | session headers: title, model, totals, `session_cost`. Only the part before `api_messages` is parsed, plus a scan for subagent `archive_path`s (that's how workers link to their parent). Files that aren't sessions are skipped and counted |
+| `~/.synaps-cli/subagent-history/*/sa_N.json` | worker runs: agent name, model, status (head of the file only) |
+| `~/.synaps-cli/synaps.log.*` | legacy `Token Usage:` lines, for cache hit % before the api-log existed |
+
+Request-level spend comes from the api-log, priced with a port of SynapsCLI's
+`pricing.rs` (`telemetry/pricing.ts`: API list price, labelled "API-equivalent" in the UI).
+For days before the api-log existed, spend falls back to each session's `session_cost`, and
+`/api/telemetry/spend` marks where that switch happens (`grain`). Days are local
+(America/New_York).
+
+Ingest runs every 5 s in a worker thread, so the bridge never waits on it. Each log is
+tailed from a saved byte offset per (file, inode). Synaps rotates by rename, so a
+rotated `.1` is finished from where it left off and the fresh file read from 0. A truncated
+or replaced file restarts, and every insert is idempotent. Session and worker files are
+re-read only when their mtime or size changes. A full backfill of two hosts (88K requests,
+1.1K sessions, 1.4K workers, 315K legacy lines) takes about 3–6 s. Errors are counted in
+`/api/telemetry/health` and never take the extension down.
+
+**Config** (plugin config, e.g. `extension.synaps-dash.telemetry_host = bella`):
+
+| Key | Default | |
+|---|---|---|
+| `telemetry` | `on` | `off` disables the store, the ingest and `/api/telemetry/*` (503) |
+| `telemetry_db` | `~/.local/share/synaps-telemetry/telemetry.db` | SQLite (WAL); safe to delete, it rebuilds |
+| `telemetry_host` | short hostname | label for this machine's rows (`host=` in the API) |
+| `telemetry_sources` | (none) | extra read-only roots, `host=path,…`: a home dir or a snapshot dir laid out as `cache/ sessions/ subagent-history/ logs/` |
+
+Endpoints (`/api/telemetry/summary|spend|agents|cache|latency|sessions|session/:id|heatmap|health`)
+sit behind the same token cookie as everything else; the shapes are in
+[`docs/telemetry-api.md`](docs/telemetry-api.md). The CLI drives the same code:
+
+```bash
+bun telemetry/cli.ts backfill --db /tmp/t.db --src bella=$HOME --src jade=/path/to/jade-snapshot
+bun telemetry/cli.ts stats --db /tmp/t.db
+bun telemetry/cli.ts query --db /tmp/t.db '/api/telemetry/summary?host=bella'
+bun test   # parsers, rotation/offsets/idempotency, pricing, every endpoint's shape (temp dirs in /tmp)
+```
 
 ## Development
 
