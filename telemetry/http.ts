@@ -27,7 +27,7 @@ function filter(u: URL): Filter | string {
 const bad = (msg: string, status = 400) => Response.json({ error: msg }, { status });
 
 /** Returns a Response for /api/telemetry/* paths, or null if the path is not ours. */
-export function handleTelemetry(req: Request, url: URL, q: TelemetryQuery | null, why?: string): Response | null {
+export function handleTelemetry(req: Request, url: URL, q: TelemetryQuery | null, why?: string, onError?: (e: unknown) => void): Response | null {
   const p = url.pathname;
   if (p !== "/api/telemetry" && !p.startsWith("/api/telemetry/")) return null;
   if (req.method !== "GET") return bad("method not allowed", 405);
@@ -70,6 +70,8 @@ export function handleTelemetry(req: Request, url: URL, q: TelemetryQuery | null
     }
     return bad("not found", 404);
   } catch (e) {
-    return bad(`telemetry query failed: ${String(e).slice(0, 200)}`, 500);
+    // details go to the extension log, never to the client
+    try { onError?.(e); } catch {}
+    return bad("telemetry query failed", 500);
   }
 }
