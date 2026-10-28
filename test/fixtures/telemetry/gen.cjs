@@ -49,7 +49,8 @@ write("spend-model.json", { bucket: "day", group: "model", series: series(MODELS
 const wShare = (i) => 0.12 + 0.24 * sstep(i, 40, N);
 write("spend-role.json", { bucket: "day", group: "role", series: series(["main", "worker"], (i, k) => (k === "worker" ? wShare(i) : 1 - wShare(i))), grain });
 const jShare = (i) => (i < 60 ? 0.04 : 0.17 + 0.05 * Math.sin(i / 9));
-write("spend-host.json", { bucket: "day", group: "host", series: series(["bella", "jade"], (i, k) => (k === "jade" ? jShare(i) : 1 - jShare(i))), grain });
+const uShare = (i) => (i < 120 ? 0.045 : 0.012); // origin undecidable (store v2: "unknown")
+write("spend-host.json", { bucket: "day", group: "host", series: series(["bella", "jade", "unknown"], (i, k) => (k === "unknown" ? uShare(i) : k === "jade" ? jShare(i) * (1 - uShare(i)) : (1 - jShare(i)) * (1 - uShare(i)))), grain });
 
 const totalReq = req.reduce((a, b) => a + b, 0);
 const now = new Date(2026, 9, 28, 2, 14, 8).getTime();

@@ -219,7 +219,7 @@ async function real(page, b) {
   expect("desktop: no horizontal overflow", s.overflowX <= 0, s.overflowX);
   expect("health: ingest status", /healthy/.test(s.ingest) && /took 1\.8 s/.test(s.ingest) && /158/.test(s.skipped) && /bad lines\s*3/.test(s.skipped), s);
   s = await d.evaluate(() => [...document.querySelectorAll("#telemetry .tl-host .seg-opt")].map((b) => b.textContent));
-  expect("host filter built from the store's sources", s.join() === "All hosts,bella,jade", s);
+  expect("host filter built from the store's sources (+ unknown)", s.join() === "All hosts,bella,jade,unknown", s);
   const first = d.log.filter((r) => r.at >= t0);
   expect("no NaN/undefined/Infinity/[object in the rendered view", !(await garbage(d)), await garbage(d));
   s = await d.evaluate(() => ({ imgs: [...document.querySelectorAll("#telemetry svg[role=img]")].map((x) => x.getAttribute("aria-label")), heat: document.querySelector("#telemetry .tl-heat")?.getAttribute("aria-label") }));
@@ -266,7 +266,7 @@ async function real(page, b) {
   await d.click('#telemetry .tl-group .seg-opt:text-is("Host")');
   await settled(d);
   s = await d.evaluate(() => document.querySelector("#telemetry [data-p=spend] .tl-legend").textContent);
-  expect("group: host", /bella/.test(s) && /jade/.test(s), s);
+  expect("group: host (incl. its own unknown series)", /bella/.test(s) && /jade/.test(s) && /unknown host/.test(s), s);
   await rangeClick("30d");
 
   // sessions: sort, paging, search, drill-down
@@ -365,6 +365,8 @@ async function real(page, b) {
   s = d.log.filter((r) => r.at >= tH);
   expect("host bella: every endpoint gets host=bella", ["summary", "spend", "agents", "cache", "latency", "sessions", "heatmap", "health"].every((n) => s.some((r) => r.name === n && r.q.host === "bella")), s.map((r) => `${r.name}:${r.q.host}`));
   expect("host change resets the sessions offset", lastReq(d, "sessions").q.offset === "0", lastReq(d, "sessions").q);
+  await d.click('#telemetry .tl-host .seg-opt:text-is("unknown")'); await settled(d);
+  expect("host unknown is a filter value", lastReq(d, "spend").q.host === "unknown" && lastReq(d, "sessions").q.host === "unknown", lastReq(d, "spend").q);
   await d.click('#telemetry .tl-host .seg-opt:text-is("All hosts")'); await settled(d);
   expect("All hosts drops the host param", !("host" in lastReq(d, "spend").q));
   await d.click("#telemetry .tl-next"); await settled(d);

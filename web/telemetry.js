@@ -500,11 +500,15 @@ const Telemetry = (() => {
   let hostSeg = seg([["", "All hosts"]], st.host, pickHost, "Host");
   let hosts = [];
   // hosts come from the store (health.ingest.sources), not a hardcoded list
+  // + "unknown": sessions whose origin host the store couldn't decide are a
+  // filter value of their own (and a spend?group=host series)
   function setHosts(list) {
-    list = list.slice().sort();
+    list = list.filter((x) => x !== "unknown").sort();
+    if (list.length >= 2) list.push("unknown");
     if (list.join() === hosts.join()) return;
     hosts = list;
-    const next = seg([["", "All hosts"], ...list.map((x) => [x, x])], st.host, pickHost, "Host");
+    const next = seg([["", "All hosts"], ...list.map((x) => [x, x === "unknown" ? "unknown" : x])], st.host, pickHost, "Host");
+    next.querySelector('.seg-opt[data-v="unknown"]')?.setAttribute("title", "Sessions whose origin host couldn't be decided");
     next.classList.add("tl-host");
     next.classList.toggle("hidden", list.length < 2 && !st.host);
     hostSeg.replaceWith(next);
@@ -680,14 +684,14 @@ const Telemetry = (() => {
       const ser = (d?.series || []).map((s) => ({ key: s.key, vals: s.points.map((p) => p[1]), tot: s.points.reduce((a, p) => a + (p[1] || 0), 0) }));
       const days = d?.series?.[0]?.points.map((p) => p[0]) || [];
       if (!days.length || !ser.length) return empty(box, "No spend in this range.");
-      const ORDER = { main: 0, worker: 1, bella: 0, jade: 1 };
+      const ORDER = { main: 0, worker: 1, bella: 0, jade: 1, unknown: 8 };
       ser.sort((a, b) => (d.group === "model" ? b.tot - a.tot : (ORDER[a.key] ?? 9) - (ORDER[b.key] ?? 9)));
       // six colours: the long tail (old/rare models) folds into one "Other" band
       if (ser.length > 6) {
         const tail = ser.splice(5);
         ser.push({ key: "__other", vals: days.map((_, i) => tail.reduce((a, s) => a + (s.vals[i] || 0), 0)), tot: tail.reduce((a, s) => a + s.tot, 0), n: tail.length });
       }
-      const label = (k) => (k === "__other" ? `Other (${ser.find((x) => x.key === k).n})` : d.group === "role" ? (k === "main" ? "Main sessions" : k === "worker" ? "Workers" : k) : d.group === "model" ? shortModel(k) : k);
+      const label = (k) => (k === "__other" ? `Other (${ser.find((x) => x.key === k).n})` : d.group === "role" ? (k === "main" ? "Main sessions" : k === "worker" ? "Workers" : k) : d.group === "model" ? shortModel(k) : k === "unknown" ? "unknown host" : k);
       ser.forEach((s, i) => { s.c = i % 6; s.label = label(s.key); });
       const sw = (d.grain || []).find((g) => g[1] === "request");
       const marker = sw ? { day: sw[0], left: "session-level", right: "request-level →", allBefore: true } : null;
