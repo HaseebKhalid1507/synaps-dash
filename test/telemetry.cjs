@@ -414,7 +414,7 @@ async function real(page, b) {
   expect("no polling once closed", count(k, "summary") === n0, { n0, n1: count(k, "summary") });
 
   // ── 20 open/close cycles: DOM, animations and listeners stay flat ──
-  const snap = () => k.evaluate(() => ({ nodes: document.querySelectorAll("#telemetry *").length + document.querySelectorAll(".tl-tip *").length, tips: document.querySelectorAll(".tl-tip").length, anims: document.getAnimations().filter((a) => a.playState === "running").length }));
+  const snap = () => k.evaluate(() => ({ nodes: document.querySelectorAll("#telemetry *").length + document.querySelectorAll(".tl-tip *").length, tips: document.querySelectorAll(".tl-tip").length, anims: document.getAnimations().filter((a) => a.playState === "running" && a.effect?.target?.closest?.("#telemetry, .tl-tip")).length }));
   await k.click("#open-telemetry"); await settled(k); await k.keyboard.press("Escape"); await k.waitForTimeout(400);
   const before = await snap();
   const nCyc = count(k, "summary");
@@ -524,7 +524,7 @@ async function real(page, b) {
     const leg = [...document.querySelectorAll("#telemetry [data-p=spend] .tl-legend .tl-lg i")].map((i) => getComputedStyle(i).backgroundColor);
     return { n: lab.length, min: +min.toFixed(3), legend: leg, distinct: new Set(leg).size };
   });
-  expect("near-monochrome album: 6 series colours, pairwise distinct (oklab ≥ .06)", s.n === 6 && s.min >= 0.06 && s.distinct === s.legend.length, s);
+  expect("near-monochrome album: 6 series colours, pairwise distinct (oklab ≥ .07)", s.n === 6 && s.min >= 0.07 && s.distinct === s.legend.length, s);
   if (SHOTS) await shot(c, "desktop-11-monochrome-album", '.tl-sec[data-sec="money"]');
   await c.context().close();
 

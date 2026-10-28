@@ -39,7 +39,7 @@ const Telemetry = (() => {
   const decimals = (x) => { const t = String(+(+x).toPrecision(6)); return t.includes("e-") ? +t.split("e-")[1] : (t.split(".")[1] || "").length; };
   function usdAxis(v, step = v) {
     if (v === 0) return "$0";
-    if (v >= 1000) return step >= 100 ? trim0(`$${(v / 1000).toFixed(step % 1000 === 0 ? 0 : step % 100 === 0 ? 1 : 2)}K`) : `$${Math.round(v).toLocaleString()}`;
+    if (v >= 1000) return step >= 100 ? `$${+(v / 1000).toFixed(decimals(step / 1000))}K` : `$${Math.round(v).toLocaleString()}`;
     const d = decimals(step);
     return `$${v.toFixed(d === 0 ? 0 : Math.max(2, d))}`;
   }
@@ -457,7 +457,9 @@ const Telemetry = (() => {
   // lighter/darker mixes of them (toward --text / --bg), so stacked bands stay
   // tellable apart. The vars are color-mix() over the tokens, so a track change
   // still cross-fades every chart; the picks are redone once the fade lands.
-  const CANDS = ["--primary", "--secondary", "--success", "--info", "--accent", "--warning"];
+  // --error is a hue source too: on a near-monochrome album it's often the only
+  // other hue there is (greedy order means it's picked only when it's needed)
+  const CANDS = ["--primary", "--secondary", "--success", "--info", "--accent", "--warning", "--error"];
   function oklab(css) {
     const m = String(css).match(/[\d.]+/g);
     if (!m || m.length < 3) return null;
@@ -474,15 +476,18 @@ const Telemetry = (() => {
     if (toks.length < 2 || !text || !bg) return;
     const pool = [];
     for (const [n, lab] of toks) {
-      pool.push({ css: `var(${n})`, lab, raw: true });
-      pool.push({ css: `color-mix(in oklab, var(${n}) 55%, var(--text))`, lab: mixLab(lab, text, 0.55) });
-      pool.push({ css: `color-mix(in oklab, var(${n}) 60%, var(--bg))`, lab: mixLab(lab, bg, 0.6) });
+      pool.push({ css: `var(${n})`, lab });
+      pool.push({ css: `color-mix(in oklab, var(${n}) 35%, var(--text))`, lab: mixLab(lab, text, 0.35) });
+      pool.push({ css: `color-mix(in oklab, var(${n}) 65%, var(--text))`, lab: mixLab(lab, text, 0.65) });
+      pool.push({ css: `color-mix(in oklab, var(${n}) 45%, var(--bg))`, lab: mixLab(lab, bg, 0.45) });
     }
+    const muted = oklab(cs.getPropertyValue("--muted"));
+    if (muted) pool.push({ css: "var(--muted)", lab: muted });
     const usable = pool.filter((c) => Math.abs(c.lab[0] - bg[0]) > 0.16); // never near-invisible on the background
     const out = [usable.shift()];
     while (out.length < 6 && usable.length) {
       let bi = 0, bs = -1;
-      usable.forEach((c, i) => { const sc = Math.min(...out.map((o) => dist(o.lab, c.lab))) + (c.raw ? 0.03 : 0); if (sc > bs) { bs = sc; bi = i; } });
+      usable.forEach((c, i) => { const sc = Math.min(...out.map((o) => dist(o.lab, c.lab))); if (sc > bs) { bs = sc; bi = i; } });
       out.push(usable.splice(bi, 1)[0]);
     }
     out.forEach((c, i) => root.style.setProperty(`--s${i}`, c.css));

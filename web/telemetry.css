@@ -389,7 +389,9 @@
   .tl-detail { top: 0; right: 0; bottom: 0; width: 100%; border-radius: 0; border: 0; }
   .tl-d-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tl-usd { display: none; }
+  .tl-sec-h { flex-direction: column; align-items: flex-start; gap: 6px; }
   .tl-headline { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .tl-filters { flex-wrap: wrap; overflow: visible; justify-content: flex-start; gap: 6px; }
   .tl-hl-g + .tl-hl-g::before { content: none; }
 }
 @media (max-width: 420px) {
