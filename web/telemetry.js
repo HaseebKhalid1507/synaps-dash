@@ -57,7 +57,7 @@ const Telemetry = (() => {
     if (s < 86400 * 30) return `${Math.floor(s / 86400)}d ago`;
     return new Date(t).toLocaleDateString([], { month: "short", day: "numeric" });
   }
-  const span = (a, b) => { const m = Math.round((b - a) / 60000); return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`; };
+  const span = (a, b) => { const m = Math.round((b - a) / 60000); return m < 60 ? `${m}m` : m < 2880 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`; };
   function bytes(v) {
     if (!isNum(v)) return DASH;
     const u = ["B", "KB", "MB", "GB", "TB"];
@@ -237,12 +237,14 @@ const Telemetry = (() => {
         if (a) { defs += `<linearGradient id="${id}" class="tl-c${s.c}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" class="tl-gs0"/><stop offset="1" class="tl-gs1"/></linearGradient>`; plot += `<path class="tl-grad" fill="url(#${id})" d="${a}"/>`; }
         if (d) plot += `<path class="tl-c${s.c} tl-line${s.dash ? " dash" : ""}${s.thin ? " thin" : ""}" pathLength="1" d="${d}"/>`;
       });
-      let mk = "";
-      for (const m of marks) {
+      let mk = "", lastL = -1e9;
+      for (const m of marks.slice().sort((a, b) => b.i - a.i)) { // newest first keeps the latest tag labelled
         if (m.i < 0 || m.i > n - 1) continue;
         const px = f1(x(m.i));
-        mk += `<line class="tl-mk${m.cls ? ` ${m.cls}` : ""}" x1="${px}" x2="${px}" y1="${T - 4}" y2="${T + ih}"/>`;
-        if (m.label) mk += `<text class="tl-mk-t${m.cls ? ` ${m.cls}` : ""}" x="${px}" y="${T - 9}" text-anchor="${px > W - 50 ? "end" : px < L + 30 ? "start" : "middle"}">${E(m.label)}</text>`;
+        mk += `<line class="tl-mk${m.cls ? ` ${m.cls}` : ""}${m.label ? "" : " quiet"}" x1="${px}" x2="${px}" y1="${T - 4}" y2="${T + ih}"/>`;
+        const room = Math.abs(lastL - px) > 9 + 6.2 * (m.label || "").length;
+        if (m.label && room) lastL = px;
+        if (m.label && room) mk += `<text class="tl-mk-t${m.cls ? ` ${m.cls}` : ""}" x="${px}" y="${T - 9}" text-anchor="${px > W - 50 ? "end" : px < L + 30 ? "start" : "middle"}">${E(m.label)}</text>`;
       }
       const svg = `<svg class="tl-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><defs>${defs}</defs>${yGrid(ticks.filter((t) => t >= t0 && t <= t1), y, L, W - R, axis)}${mk}`
         + `<g class="tl-plot">${plot}</g><g class="tl-hov"></g>${xLabels(n, x, label, iw, H - 6)}</svg>`;
@@ -618,7 +620,12 @@ const Telemetry = (() => {
       if (!days.length || !ser.length) return empty(box, "No spend in this range.");
       const ORDER = { main: 0, worker: 1, bella: 0, jade: 1 };
       ser.sort((a, b) => (d.group === "model" ? b.tot - a.tot : (ORDER[a.key] ?? 9) - (ORDER[b.key] ?? 9)));
-      const label = (k) => (d.group === "role" ? (k === "main" ? "Main sessions" : k === "worker" ? "Workers" : k) : d.group === "model" ? shortModel(k) : k);
+      // six colours: the long tail (old/rare models) folds into one "Other" band
+      if (ser.length > 6) {
+        const tail = ser.splice(5);
+        ser.push({ key: "__other", vals: days.map((_, i) => tail.reduce((a, s) => a + (s.vals[i] || 0), 0)), tot: tail.reduce((a, s) => a + s.tot, 0), n: tail.length });
+      }
+      const label = (k) => (k === "__other" ? `Other (${ser.find((x) => x.key === k).n})` : d.group === "role" ? (k === "main" ? "Main sessions" : k === "worker" ? "Workers" : k) : d.group === "model" ? shortModel(k) : k);
       ser.forEach((s, i) => { s.c = i % 6; s.label = label(s.key); });
       const sw = (d.grain || []).find((g) => g[1] === "request");
       const marker = sw ? { day: sw[0], left: "session-level", right: "request-level →", allBefore: true } : null;

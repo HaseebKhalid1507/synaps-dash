@@ -6,6 +6,8 @@
 // endpoint 500 → only its panels fail (and Retry recovers), summary polling only
 // while visible, mobile layout + drawer entry, reduced motion.
 // Sandbox (:7718) by default; SD_URL=… to point elsewhere. SHOTS=dir saves screenshots.
+// REAL=1: no mocks, against a sandbox running the telemetry store (feat/telemetry-store
+// merged): data-agnostic checks only, screenshots prefixed real-.
 const { chromium } = require(process.env.HOME + "/Projects/SynapsDASH/node_modules/playwright");
 const fs = require("fs");
 const path = require("path");
@@ -22,6 +24,10 @@ const SESS = fx("sessions.json"), STAR = fx("session-star.json");
 function mock(ctx, opts = {}) {
   const log = [];
   const fails = opts.fails || new Set();
+  if (process.env.REAL) { // record, don't fulfil
+    ctx.on("request", (r) => { const u = new URL(r.url()); if (u.pathname.startsWith("/api/telemetry/")) { const ep = u.pathname.slice(15); log.push({ ep, name: ep.split("/")[0], q: Object.fromEntries(u.searchParams), at: Date.now() }); } });
+    return Promise.resolve(log);
+  }
   return ctx.route("**/api/telemetry/**", (route) => {
     const u = new URL(route.request().url());
     const ep = u.pathname.replace(/^\/api\/telemetry\//, "");
@@ -71,6 +77,46 @@ const shot = async (p, name, sel) => {
   await p.screenshot({ path: path.join(SHOTS, `${name}.png`) });
 };
 
+async function real(page, b) {
+  const P = (p) => p.evaluate(() => Object.fromEntries([...document.querySelectorAll("#telemetry [data-p]")].map((el) => [el.dataset.p, el.classList.contains("is-err") ? `err: ${el.querySelector(".tl-err span")?.textContent}` : el.querySelector(".tl-empty") ? "empty" : "ok"])));
+  const d = await page();
+  await d.click("#open-telemetry"); await settled(d);
+  let ps = await P(d);
+  console.log("panels (real):", ps);
+  expect("real: no panel errors", Object.values(ps).every((v) => !v.startsWith("err")), ps);
+  const zeros = await d.evaluate(() => [...document.querySelectorAll("#telemetry .tl-tile-v span")].map((x) => x.textContent));
+  console.log("live strip (real):", zeros);
+  for (const [name, sel] of [["real-desktop-1-live-money", null], ["real-desktop-2-money", '.tl-sec[data-sec="money"]'], ["real-desktop-3-cache", '.tl-sec[data-sec="cache"]'], ["real-desktop-4-latency", '.tl-sec[data-sec="latency"]'], ["real-desktop-5-sessions", '.tl-sec[data-sec="sessions"]'], ["real-desktop-6-health", '.tl-sec[data-sec="health"]']]) await shot(d, name, sel);
+  for (const r of ["7d", "90d", "All"]) {
+    await d.click(`#telemetry .tl-range .seg-opt:text-is("${r}")`); await settled(d);
+    ps = await P(d);
+    expect(`real: range ${r} renders`, Object.values(ps).every((v) => !v.startsWith("err")), ps);
+  }
+  await shot(d, "real-desktop-2b-money-all", '.tl-sec[data-sec="money"]');
+  await shot(d, "real-desktop-3b-cache-all", '.tl-sec[data-sec="cache"]');
+  for (const g of ["Main vs worker", "Host"]) { await d.click(`#telemetry .tl-group .seg-opt:text-is("${g}")`); await settled(d); expect(`real: group ${g}`, !(await P(d)).spend.startsWith("err")); }
+  await shot(d, "real-desktop-2c-money-host", '.tl-sec[data-sec="money"]');
+  await d.click("#telemetry [data-p=sessions] tbody tr");
+  await d.waitForSelector("#telemetry .tl-d-stats", { timeout: 8000 }).catch(() => fail.push("real: session detail never loaded"));
+  await shot(d, "real-desktop-7-session-detail");
+  await d.keyboard.press("Escape"); await d.waitForTimeout(400);
+  await d.keyboard.press("Escape"); await d.waitForTimeout(500);
+  expect("real: Escape back to the session", await d.evaluate(() => document.getElementById("telemetry").classList.contains("hidden")));
+  expect("real desktop: no page errors", d.errs.length === 0, d.errs);
+  const m = await page({ width: 390, height: 844, touch: true });
+  await m.tap("#open-telemetry"); await settled(m);
+  const ov = await m.evaluate(() => { const R = document.getElementById("telemetry"); return R.scrollWidth - R.clientWidth; });
+  expect("real mobile: no horizontal overflow", ov <= 0, ov);
+  for (const [name, sel] of [["real-mobile-1-live", null], ["real-mobile-2-money", '.tl-sec[data-sec="money"]'], ["real-mobile-3-cache", '.tl-sec[data-sec="cache"]'], ["real-mobile-4-latency", '.tl-sec[data-sec="latency"]'], ["real-mobile-5-sessions", '.tl-sec[data-sec="sessions"]'], ["real-mobile-6-health", '[data-p="heatmap"]'], ["real-mobile-6b-health", '[data-p="ingest"]']]) await shot(m, name, sel);
+  expect("real mobile: no page errors", m.errs.length === 0, m.errs);
+  const r = await page({ reduced: true });
+  await r.click("#open-telemetry"); await settled(r);
+  expect("real reduced motion: renders", Object.values(await P(r)).every((v) => !v.startsWith("err")));
+  await b.close();
+  if (fail.length) { console.log("FAIL\n  " + fail.join("\n  ")); process.exit(1); }
+  console.log("telemetry (REAL backend): all checks pass");
+}
+
 (async () => {
   const b = await chromium.launch();
   const page = async ({ width = 1440, height = 900, reduced = false, touch = false, ...mo } = {}) => {
@@ -81,6 +127,7 @@ const shot = async (p, name, sel) => {
     await p.goto(url); await p.waitForSelector("#open-telemetry", { state: "attached" });
     p.errs = errs; p.log = log; return p;
   };
+  if (process.env.REAL) { await real(page, b); return; }
   const panelState = (p) => p.evaluate(() => Object.fromEntries([...document.querySelectorAll("#telemetry [data-p]")].map((el) => [el.dataset.p, el.classList.contains("is-err") ? "err" : el.classList.contains("is-loading") ? "loading" : "ok"])));
 
   // ── desktop ──

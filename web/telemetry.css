@@ -128,6 +128,7 @@
 .tl-still .tl-plot, .tl-still .tl-line, .tl-still .tl-grad, .tl-still.tl-card, .tl-still .tl-hb-f, .tl-still .tl-hm-c { animation: none; }
 .tl-tint { fill: color-mix(in oklab, var(--muted) 6%, transparent); }
 .tl-mk { stroke: color-mix(in oklab, var(--text) 45%, transparent); stroke-width: 1; stroke-dasharray: 3 3; }
+.tl-mk.quiet, .tl-mk:not(.warn):not(.grain) { stroke: color-mix(in oklab, var(--text) 28%, transparent); }
 .tl-mk.warn { stroke: var(--warning); stroke-dasharray: 2 2; }
 .tl-mk-t { font: 600 10px var(--sans); fill: color-mix(in oklab, var(--text) 75%, transparent); letter-spacing: .02em; }
 .tl-mk-t.dim { fill: color-mix(in oklab, var(--muted) 85%, transparent); font-weight: 500; }
