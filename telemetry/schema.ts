@@ -5,6 +5,14 @@ import { mkdirSync, chmodSync, openSync, closeSync, statSync, existsSync } from 
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 
+// ┌────────────────────────────────────────────────────────────────────────────────────┐
+// │ v3+ MIGRATIONS MUST BE ADDITIVE. Never DROP or rebuild `requests`, `traces` or      │
+// │ `legacy_usage`: Synaps rotates its logs (50 MB, 1 generation by default), so for    │
+// │ anything older than the oldest live generation this store is the ONLY copy left.   │
+// │ v2's drop-and-rebuild was safe only because no v1 store was ever deployed. Add     │
+// │ columns/indexes/tables; derived tables (sessions, rollup_*, legacy_daily) may be   │
+// │ rebuilt from those three, never the other way round.                               │
+// └────────────────────────────────────────────────────────────────────────────────────┘
 const MIGRATIONS: string[] = [
   // v1
   `
@@ -170,6 +178,10 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX file_state_kind ON file_state(host, kind);
   CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+  `,
+  // v3 (additive): unlinked (pre-#322) rows per host, for the session-grain probe
+  `
+  CREATE INDEX IF NOT EXISTS requests_unlinked ON requests(host, ts) WHERE runtime_session_id IS NULL;
   `,
 ];
 
