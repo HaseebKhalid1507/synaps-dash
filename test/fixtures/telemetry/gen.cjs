@@ -57,7 +57,7 @@ write("summary.json", {
   generated_at: now,
   now: { spend_today: r2(spend[N - 1]), burn_rate_per_hour: 38.6, requests_today: req[N - 1], hit_pct_1h: 98.4, ttft_p50_ms_1h: 480, total_p50_ms_1h: 3800, live_sessions: 4, live_workers: 2 },
   all: { spend: 53679.0, requests: totalReq, sessions: 1138, first_ts: first.getTime() + 9 * 3600000, last_ts: now,
-    tokens: { input: 1842113400, output: 412880210, cache_read: 31877455120, cache_write: 1210448770 }, saved_by_cache: 412318.4 },
+    tokens: { input: 1842113400, output: 412880210, cache_read: 31877455120, cache_write: 1210448770 }, saved_by_cache: 412318.4, saved_by_cache_net: 396104.9 },
 });
 
 // agents
@@ -72,7 +72,8 @@ const reqDays = days.map((d, i) => [d, i]).filter(([d]) => isReq(d));
 // before the cutover the store reads synaps.log "Token Usage:" lines: un-split writes
 const legacyDaily = days.map((d, i) => [d, i]).filter(([d]) => !isReq(d)).map(([d, i]) => {
   const hit = 86 + 6 * sstep(i, 0, 60) + (rnd() - 0.5) * 3, total = req[i] * 45000 * noise(0.08), read = Math.round(total * hit / 100), wr = total - read;
-  return { day: ymd(d), grain: "legacy", hit_pct: r1(hit), read, write_5m: null, write_1h: null, write: Math.round(wr * 0.8), fresh_input: Math.round(wr * 0.2) };
+  const w = Math.round(wr * 0.8);
+  return { day: ymd(d), grain: "legacy", hit_pct: r1(hit), read, write_5m: null, write_1h: null, write_unknown: w, write: w, fresh_input: Math.round(wr * 0.2) };
 });
 const releases = [["v0.8.0", "2026-06-20"], ["v0.9.0", "2026-08-14"], ["v0.10.0", "2026-09-18"], ["v0.11.0", "2026-10-16"]]
   .map(([tag, s]) => { const [y, m, dd] = s.split("-").map(Number); return { tag, ts: new Date(y, m - 1, dd, 15, 30).getTime() }; });
@@ -84,7 +85,10 @@ const cacheDaily = reqDays.map(([d, i]) => {
   const read = Math.round(total * hit / 100);
   const wr = total - read;
   const oneH = s < "2026-08-14" ? 0.08 : 0.78;
-  return { day: s, grain: "request", hit_pct: r1(hit), read, write_5m: Math.round(wr * 0.82 * (1 - oneH)), write_1h: Math.round(wr * 0.82 * oneH), fresh_input: Math.round(wr * 0.18) };
+  // the cutover day mixes legacy lines and api-log rows; early api-log rows have no TTL split
+  const mixed = s === REQ_FROM, unknown = s < "2026-07-01" ? Math.round(wr * 0.82 * (mixed ? 0.6 : 0.25)) : null;
+  const w5 = Math.round((wr * 0.82 - (unknown || 0)) * (1 - oneH)), w1 = Math.round((wr * 0.82 - (unknown || 0)) * oneH);
+  return { day: s, grain: mixed ? "mixed" : "request", hit_pct: r1(hit), read, write_5m: w5, write_1h: w1, write_unknown: unknown, write: w5 + w1 + (unknown || 0), fresh_input: Math.round(wr * 0.18) };
 });
 write("cache.json", {
   daily: [...legacyDaily, ...cacheDaily],
@@ -120,9 +124,9 @@ write("heatmap.json", { cells });
 
 // health
 write("health.json", {
-  stops: [{ stop: "tool_use", count: 38651 }, { stop: "end_turn", count: 5915 }, { stop: "max_tokens", count: 184 }, { stop: "refusal", count: 92 }, { stop: "none", count: 74 }],
+  stops: [{ stop: "tool_use", count: 38651 }, { stop: "end_turn", count: 5915 }, { stop: "max_tokens", count: 184 }, { stop: "refusal", count: 92 }, { stop: null, count: 74 }],
   refusal_retries: 67, translation_losses: 0, tools_changed_misses: 23,
-  ingest: { last_run: now - 94000, last_run_ms: 1840, rows: { requests: totalReq, traces: 61204, sessions: 1138, workers: 2871, legacy: 412 }, errors: 0, bad_lines: 3, last_error: null, skipped_files: 158,
+  ingest: { last_run: now - 94000, last_run_ms: 1840, rows: { requests: totalReq, traces: 61204, sessions: 1138, workers: 2871, legacy: 412 }, errors: 0, bad_lines: 3, lost_bytes: 0, last_error: null, skipped_files: 158,
     sources: [{ host: "bella", kind: "api", path: "/home/haseeb/.synaps-cli/cache/api-log.jsonl", offset: 412883912, size: 412883912 },
       { host: "bella", kind: "trace", path: "/home/haseeb/.synaps-cli/cache/request-trace.jsonl", offset: 96112004, size: 96112004 },
       { host: "bella", kind: "log", path: "/home/haseeb/.synaps-cli/logs/synaps.log.*", offset: 18220110, size: 18220110, files: 61 },
@@ -145,19 +149,24 @@ for (let k = 0; k < 1138; k++) {
   const dIdx = Math.min(N - 1, Math.floor((created - first.getTime()) / DAY));
   const model = Object.entries(mix[dIdx]).sort((a, b) => b[1] - a[1])[rnd() < 0.85 ? 0 : 2][0];
   const lvl = isReq(days[dIdx]);
+  const chain = rnd() < 0.15 ? "↳ ".repeat(1 + Math.floor(rnd() * 3)) : "";
+  const title = TITLES[Math.floor(rnd() * TITLES.length)];
   rows.push({
+    grain: lvl ? "request" : "session", title_raw: chain + title,
     id: `${ymd(new Date(created)).replace(/-/g, "")}-${String(new Date(created).getHours()).padStart(2, "0")}${String(new Date(created).getMinutes()).padStart(2, "0")}${String(new Date(created).getSeconds()).padStart(2, "0")}-${Math.floor(rnd() * 65536).toString(16).padStart(4, "0")}`,
-    host: hosts(), title: TITLES[Math.floor(rnd() * TITLES.length)], model, created, updated, requests: reqs,
+    host: hosts(), title, model, created, updated, requests: reqs,
     spend: r2(reqs * (0.06 + rnd() * 0.06)), hit_pct: lvl ? r1(95 + rnd() * 3.9) : null,
     peak_context_tokens: lvl ? Math.round((40 + rnd() * 150) * 1000) : null, workers: Math.floor(Math.pow(rnd(), 2) * 7),
   });
 }
 const sumSpend = rows.reduce((a, r) => a + r.spend, 0);
 for (const r of rows) r.spend = r2(r.spend * 53679 / sumSpend);
+for (const r of rows) if (rnd() < 0.02) r.spend = null; // session files without session_cost
+for (const r of rows) if (rnd() < 0.01) r.host = "unknown"; // origin host undecidable (store v2)
 rows.sort((a, b) => b.updated - a.updated);
 // a showcase session: recent, rich, with a timeline
 const star = rows[3];
-Object.assign(star, { title: "telemetry store: api-log ingest + pricing", model: "claude-opus-5-5", host: "bella", requests: 412, spend: 18.4, hit_pct: 97.1, peak_context_tokens: 182400, workers: 3 });
+Object.assign(star, { title: "telemetry store: api-log ingest + pricing", title_raw: "↳ telemetry store: api-log ingest + pricing", grain: "request", model: "claude-opus-5-5", host: "bella", requests: 412, spend: 18.4, hit_pct: 97.1, peak_context_tokens: 182400, workers: 3 });
 write("sessions.json", { total: rows.length, rows });
 
 const tl = [];
