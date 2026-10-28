@@ -1,0 +1,348 @@
+// Telemetry view (web/telemetry.js) against a mocked /api/telemetry/* (the
+// backend lives on another branch): fixtures in test/fixtures/telemetry follow
+// API.md v1. Covers: open from the rail + #telemetry deep link + back/Escape,
+// every panel renders, number formatting, null → "—", range + group toggles,
+// sorting/search/paging, session drill-down (rich + empty timeline), one
+// endpoint 500 → only its panels fail (and Retry recovers), summary polling only
+// while visible, mobile layout + drawer entry, reduced motion.
+// Sandbox (:7718) by default; SD_URL=… to point elsewhere. SHOTS=dir saves screenshots.
+const { chromium } = require(process.env.HOME + "/Projects/SynapsDASH/node_modules/playwright");
+const fs = require("fs");
+const path = require("path");
+const url = process.env.SD_URL || fs.readFileSync(`${process.env.HOME}/.synaps-cli/run/synaps-dash-webproto.url`, "utf8").trim();
+const SHOTS = process.env.SHOTS || "";
+const FX = path.join(__dirname, "fixtures/telemetry");
+const fx = (n) => JSON.parse(fs.readFileSync(path.join(FX, n), "utf8"));
+const DAY = 86400000;
+const fail = [];
+const expect = (name, ok, detail) => { if (!ok) fail.push(`${name}${detail !== undefined ? `: ${JSON.stringify(detail).slice(0, 400)}` : ""}`); };
+
+// ── mock backend ──
+const SESS = fx("sessions.json"), STAR = fx("session-star.json");
+function mock(ctx, opts = {}) {
+  const log = [];
+  const fails = opts.fails || new Set();
+  return ctx.route("**/api/telemetry/**", (route) => {
+    const u = new URL(route.request().url());
+    const ep = u.pathname.replace(/^\/api\/telemetry\//, "");
+    const name = ep.split("/")[0];
+    log.push({ ep, name, q: Object.fromEntries(u.searchParams), at: Date.now() });
+    const json = (body, status = 200) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+    if (fails.has(name)) return json({ error: "boom" }, 500);
+    const from = Number(u.searchParams.get("from")) || 0;
+    const keep = (arr) => (from ? arr.slice(-Math.ceil((Date.now() - from) / DAY)) : arr); // fixtures end "today"
+    switch (name) {
+      case "summary": return json(opts.summary ? opts.summary(fx("summary.json")) : fx("summary.json"));
+      case "spend": {
+        const d = fx(`spend-${u.searchParams.get("group") || "model"}.json`);
+        d.series.forEach((s) => (s.points = keep(s.points)));
+        return json(d);
+      }
+      case "agents": return json(opts.agents ? opts.agents(fx("agents.json")) : fx("agents.json"));
+      case "cache": { const d = fx("cache.json"); d.daily = keep(d.daily); return json(d); }
+      case "latency": { const d = fx("latency.json"); d.daily = keep(d.daily); return json(d); }
+      case "heatmap": return json(fx("heatmap.json"));
+      case "health": return json(fx("health.json"));
+      case "sessions": {
+        const key = { cost: "spend", updated: "updated", requests: "requests" }[u.searchParams.get("sort") || "cost"];
+        const q = (u.searchParams.get("q") || "").toLowerCase();
+        const off = +u.searchParams.get("offset") || 0, lim = +u.searchParams.get("limit") || 50;
+        const rows = SESS.rows.filter((r) => !q || r.id.includes(q) || r.title.toLowerCase().includes(q)).sort((a, b) => b[key] - a[key]);
+        return json({ total: rows.length, rows: rows.slice(off, off + lim) });
+      }
+      case "session": {
+        const id = decodeURIComponent(ep.split("/")[1] || "");
+        if (id === STAR.session.id) return json(opts.star ? opts.star(STAR) : STAR);
+        const row = SESS.rows.find((r) => r.id === id);
+        return row ? json({ session: row, timeline: [], workers: [] }) : json({ error: "not found" }, 404);
+      }
+    }
+    return json({ error: "not found" }, 404);
+  }).then(() => log);
+}
+
+const PANELS = ["live", "headline", "spend", "agents", "hit", "keepwarm", "writes", "miss", "ttft", "total", "split", "scatter", "sessions", "heatmap", "stops", "ingest"];
+const settled = (p) => p.waitForFunction((ids) => ids.every((id) => { const el = document.querySelector(`#telemetry [data-p="${id}"]`); return el && !el.classList.contains("is-loading") && !el.classList.contains("is-busy"); }), PANELS, { timeout: 15000 });
+const shot = async (p, name, sel) => {
+  if (!SHOTS) return;
+  fs.mkdirSync(SHOTS, { recursive: true });
+  if (sel) await p.evaluate((s) => { const el = document.querySelector(s); const r = document.getElementById("telemetry"); r.scrollTop += el.getBoundingClientRect().top - r.querySelector(".tl-head").offsetHeight - 6; }, sel);
+  await p.waitForTimeout(1300);
+  await p.screenshot({ path: path.join(SHOTS, `${name}.png`) });
+};
+
+(async () => {
+  const b = await chromium.launch();
+  const page = async ({ width = 1440, height = 900, reduced = false, touch = false, ...mo } = {}) => {
+    const ctx = await b.newContext({ viewport: { width, height }, hasTouch: touch, isMobile: touch, deviceScaleFactor: touch ? 2 : 1, reducedMotion: reduced ? "reduce" : "no-preference" });
+    const log = await mock(ctx, mo);
+    const p = await ctx.newPage();
+    const errs = []; p.on("pageerror", (e) => errs.push(String(e))); p.on("console", (m) => { if (m.type() === "error" && !/Failed to load resource/.test(m.text())) errs.push(m.text()); });
+    await p.goto(url); await p.waitForSelector("#open-telemetry", { state: "attached" });
+    p.errs = errs; p.log = log; return p;
+  };
+  const panelState = (p) => p.evaluate(() => Object.fromEntries([...document.querySelectorAll("#telemetry [data-p]")].map((el) => [el.dataset.p, el.classList.contains("is-err") ? "err" : el.classList.contains("is-loading") ? "loading" : "ok"])));
+
+  // ── desktop ──
+  const d = await page();
+  const t0 = Date.now();
+  await d.click("#open-telemetry");
+  await settled(d);
+  let s = await d.evaluate(() => ({ hash: location.hash, on: document.getElementById("main").classList.contains("tl-on"), vis: getComputedStyle(document.getElementById("telemetry")).display !== "none",
+    btn: document.getElementById("open-telemetry").getAttribute("aria-pressed"), thread: getComputedStyle(document.getElementById("scroller")).visibility }));
+  expect("desktop: rail button opens the view", s.vis && s.on && s.hash === "#telemetry" && s.btn === "true" && s.thread === "hidden", s);
+  const ps = await panelState(d);
+  expect("desktop: every panel rendered (none loading / error)", PANELS.every((id) => ps[id] === "ok"), ps);
+  s = await d.evaluate(() => {
+    const T = (sel) => document.querySelector(sel)?.textContent.replace(/\s+/g, " ").trim() ?? null;
+    const R = document.getElementById("telemetry");
+    return {
+      tiles: [...R.querySelectorAll(".tl-tile[data-k]")].map((t) => `${t.dataset.k}=${t.querySelector(".tl-tile-v span").textContent}`),
+      headline: T("#telemetry [data-p=headline]"),
+      usd: T("#telemetry .tl-usd"),
+      spendDays: +R.querySelector('[data-p=spend] .tl-chart').dataset.n,
+      spendBars: R.querySelectorAll('[data-p=spend] .tl-plot .tl-fill').length,
+      legend: T('#telemetry [data-p=spend] .tl-legend'),
+      grainMarker: !!R.querySelector('[data-p=spend] .tl-mk'),
+      agents: R.querySelectorAll('[data-p=agents] tbody tr').length,
+      hitLine: R.querySelectorAll('[data-p=hit] .tl-line').length, releases: [...R.querySelectorAll('[data-p=hit] .tl-mk-t')].map((x) => x.textContent),
+      writes: R.querySelectorAll('[data-p=writes] .tl-fill').length, miss: R.querySelectorAll('[data-p=miss] .tl-hb-r').length, missTop: T('#telemetry [data-p=miss] .tl-hb-r'),
+      keepwarm: T('#telemetry [data-p=keepwarm] .tl-kw-big'),
+      ttft: R.querySelectorAll('[data-p=ttft] .tl-line').length, total: R.querySelectorAll('[data-p=total] .tl-line').length,
+      split: T('#telemetry [data-p=split] .tl-wf-l'), retry: T('#telemetry [data-p=split] .tl-retry-stat'),
+      scatterDots: (R.querySelector('[data-p=scatter] .tl-dots')?.getAttribute("d").match(/M/g) || []).length,
+      rows: R.querySelectorAll('[data-p=sessions] tbody tr').length, pager: T('#telemetry .tl-pager span'),
+      cells: R.querySelectorAll('[data-p=heatmap] .tl-hm-c[data-wd]').length, hot: R.querySelectorAll('[data-p=heatmap] .tl-hm-c.hot').length, peak: T('#telemetry .tl-peak'),
+      stops: [...R.querySelectorAll('[data-p=stops] .tl-hb-r')].map((r) => `${r.className.replace(/tl-hb-r ?/, "") || "-"}:${r.querySelector(".tl-hb-k span").textContent}`),
+      ingest: T('#telemetry [data-p=ingest] .tl-ing-top'), skipped: T('#telemetry [data-p=ingest] .tl-ing-grid'),
+      overflowX: R.scrollWidth - R.clientWidth,
+    };
+  });
+  expect("live strip: 6 tiles, formatted", s.tiles.length === 6 && s.tiles.includes("hit=98.4%") && s.tiles.includes("ttft=480 ms") && s.tiles.includes("live=4") && /^spend=\$\d/.test(s.tiles[0]) && s.tiles.includes("burn=$38.60/h"), s.tiles);
+  expect("money headline: since April · $53.7K · cache saved $412K", /since April/.test(s.headline) && s.headline.includes("$53.7K") && /cache saved \$412\.3K/.test(s.headline), s.headline);
+  expect("labelled API-equivalent", /API-equivalent/.test(s.usd), s.usd);
+  expect("spend: 30 days by default, stacked bars, 4 models in legend", s.spendDays === 30 && s.spendBars >= 30 && /opus-5-5/.test(s.legend) && /fable-5-1/.test(s.legend), s);
+  expect("agents table", s.agents === 12, s.agents);
+  expect("cache: hit line + in-range release markers", s.hitLine === 1 && s.releases.includes("v0.11.0"), s);
+  expect("cache: write bars, miss reasons (top: messages changed 238)", s.writes >= 30 && s.miss === 4 && /messages changed/.test(s.missTop) && /238/.test(s.missTop), s);
+  expect("cache: keep-warm return", /8\.2×/.test(s.keepwarm), s.keepwarm);
+  expect("latency: TTFT 3 lines, total 2 lines, split, retry rate", s.ttft === 3 && s.total === 2 && /310 ms/.test(s.split) && /0\.71%/.test(s.retry), s);
+  expect("latency: 2000-point scatter", s.scatterDots === 2000, s.scatterDots);
+  expect("sessions: page of 50, pager", s.rows === 50 && /1–50 of 1,138/.test(s.pager), s);
+  expect("heatmap: 168 cells, hot cells, peak", s.cells === 168 && s.hot >= 5 && /Peak/.test(s.peak), s);
+  expect("health: stops, anomalies flagged", s.stops.length === 5 && s.stops.includes("bad:refusal") && s.stops.includes("warn:max tokens") && s.stops.includes("warn:no stop reason"), s.stops);
+  expect("desktop: no horizontal overflow", s.overflowX <= 0, s.overflowX);
+  expect("health: ingest status", /healthy/.test(s.ingest) && /took 1\.8 s/.test(s.ingest) && /158/.test(s.skipped) && /bad lines\s*3/.test(s.skipped), s);
+  s = await d.evaluate(() => [...document.querySelectorAll("#telemetry .tl-host .seg-opt")].map((b) => b.textContent));
+  expect("host filter built from the store's sources", s.join() === "All hosts,bella,jade", s);
+  const first = d.log.filter((r) => r.at >= t0);
+  expect("requests: every endpoint once, range sent as from", ["summary", "spend", "agents", "cache", "latency", "sessions", "heatmap", "health"].every((n) => first.some((r) => r.name === n)) && first.find((r) => r.name === "spend").q.from, first.map((r) => r.name));
+  for (const [name, sel] of [["desktop-1-live-money", null], ["desktop-2-money", '.tl-sec[data-sec="money"]'], ["desktop-3-cache", '.tl-sec[data-sec="cache"]'], ["desktop-4-latency", '.tl-sec[data-sec="latency"]'], ["desktop-5-sessions", '.tl-sec[data-sec="sessions"]'], ["desktop-6-health", '.tl-sec[data-sec="health"]']]) await shot(d, name, sel);
+
+  // tooltips
+  await d.evaluate(() => document.querySelector('#telemetry .tl-sec[data-sec="money"]').scrollIntoView());
+  await d.waitForTimeout(300);
+  let bx = await d.locator("#telemetry [data-p=spend] svg").boundingBox();
+  await d.mouse.move(bx.x + bx.width * 0.6, bx.y + bx.height / 2);
+  s = await d.evaluate(() => ({ on: document.querySelector(".tl-tip").classList.contains("on"), text: document.querySelector(".tl-tip").textContent, band: !!document.querySelector("#telemetry [data-p=spend] .tl-hov .tl-band") }));
+  expect("tooltip: spend hover shows the day's breakdown + total", s.on && /Total/.test(s.text) && /opus/.test(s.text) && s.band, s);
+  if (SHOTS) await d.screenshot({ path: path.join(SHOTS, "desktop-tooltip-spend.png"), clip: { x: bx.x - 20, y: bx.y - 80, width: bx.width + 40, height: bx.height + 160 } });
+  await d.mouse.move(5, 5);
+  expect("tooltip hides on leave", !(await d.evaluate(() => document.querySelector(".tl-tip").classList.contains("on"))));
+  await d.evaluate(() => document.querySelector('#telemetry [data-p="heatmap"]').scrollIntoView());
+  await d.waitForTimeout(300);
+  const cell = d.locator('#telemetry .tl-hm-c[data-wd="1"][data-h="14"]');
+  await cell.hover();
+  s = await d.evaluate(() => document.querySelector(".tl-tip").textContent);
+  expect("tooltip: heatmap cell", /Tuesday · 2 PM–3 PM/.test(s) && /Requests/.test(s), s);
+  if (SHOTS) { const hb = await d.locator("#telemetry [data-p=heatmap]").boundingBox(); await d.screenshot({ path: path.join(SHOTS, "desktop-tooltip-heatmap.png"), clip: { x: hb.x - 10, y: hb.y - 10, width: hb.width + 20, height: hb.height + 20 } }); }
+
+  // range + group
+  const rangeClick = async (label) => { await d.click(`#telemetry .tl-range .seg-opt:text-is("${label}")`); await settled(d); };
+  await rangeClick("7d");
+  s = await d.evaluate(() => ({ n: +document.querySelector("#telemetry [data-p=spend] .tl-chart").dataset.n, cache: document.querySelectorAll("#telemetry [data-p=writes] .tl-fill").length, sub: document.querySelector(".tl-spend-sub").textContent }));
+  expect("range 7d: spend + cache follow", s.n === 7 && s.cache >= 7 && s.cache <= 14 && /last 7 days/.test(s.sub), s);
+  const r7 = d.log.filter((r) => r.name === "spend").pop().q.from;
+  expect("range 7d: from = local midnight six days ago", Math.abs(+r7 - (new Date(new Date().setHours(0, 0, 0, 0)).getTime() - 6 * DAY)) < 2 * 3600000, r7);
+  await rangeClick("All");
+  s = await d.evaluate(() => ({ n: +document.querySelector("#telemetry [data-p=spend] .tl-chart").dataset.n, area: document.querySelectorAll("#telemetry [data-p=spend] .tl-area").length, mk: [...document.querySelectorAll("#telemetry [data-p=spend] .tl-mk-t")].map((x) => x.textContent) }));
+  expect("range All: 202 days as stacked areas, grain marker session → request", s.n === 202 && s.area === 4 && s.mk.some((x) => /request-level/.test(x)) && s.mk.some((x) => /session-level/.test(x)), s);
+  s = await d.evaluate(() => document.querySelector("#telemetry [data-p=writes] .tl-legend").textContent);
+  expect("range All: legacy (un-split) cache writes before the cutover", /Un-split/.test(s) && /1h TTL/.test(s), s);
+  expect("range All: no from param", !("from" in d.log.filter((r) => r.name === "spend").pop().q));
+  await shot(d, "desktop-2b-money-all", '.tl-sec[data-sec="money"]');
+  await d.click('#telemetry .tl-group .seg-opt:text-is("Main vs worker")');
+  await settled(d);
+  s = await d.evaluate(() => document.querySelector("#telemetry [data-p=spend] .tl-legend").textContent);
+  expect("group: main vs worker", /Main sessions/.test(s) && /Workers/.test(s) && d.log.filter((r) => r.name === "spend").pop().q.group === "role", s);
+  await d.click('#telemetry .tl-group .seg-opt:text-is("Host")');
+  await settled(d);
+  s = await d.evaluate(() => document.querySelector("#telemetry [data-p=spend] .tl-legend").textContent);
+  expect("group: host", /bella/.test(s) && /jade/.test(s), s);
+  await rangeClick("30d");
+
+  // sessions: sort, paging, search, drill-down
+  await d.click('#telemetry [data-p=sessions] th[data-sort="requests"]');
+  await settled(d);
+  s = await d.evaluate(() => [...document.querySelectorAll("#telemetry [data-p=sessions] tbody tr")].slice(0, 3).map((tr) => +tr.children[3].textContent.replace(/,/g, "")));
+  expect("sessions: sort by requests", d.log.filter((r) => r.name === "sessions").pop().q.sort === "requests" && s[0] >= s[1] && s[1] >= s[2], s);
+  await d.click("#telemetry .tl-next");
+  await settled(d);
+  s = await d.evaluate(() => document.querySelector("#telemetry .tl-pager span").textContent);
+  expect("sessions: next page", /51–100/.test(s) && d.log.filter((r) => r.name === "sessions").pop().q.offset === "50", s);
+  await d.keyboard.press("/");
+  expect("'/' focuses the session search", await d.evaluate(() => document.activeElement.matches("#telemetry .tl-search input")));
+  await d.keyboard.type(STAR.session.id.slice(0, 15));
+  await d.waitForFunction(() => document.querySelectorAll("#telemetry [data-p=sessions] tbody tr").length === 1, null, { timeout: 5000 }).catch(() => {});
+  await settled(d);
+  s = await d.evaluate(() => ({ n: document.querySelectorAll("#telemetry [data-p=sessions] tbody tr").length, pager: document.querySelector("#telemetry .tl-pager span").textContent }));
+  expect("sessions: search", s.n === 1 && /1–1 of 1/.test(s.pager), s);
+  await d.click("#telemetry [data-p=sessions] tbody tr");
+  await d.waitForSelector("#telemetry .tl-d-ctx svg", { timeout: 5000 }).catch(() => {});
+  await d.waitForTimeout(500);
+  s = await d.evaluate(() => {
+    const D = document.querySelector("#telemetry .tl-detail");
+    return { vis: !D.classList.contains("hidden"), title: D.querySelector("h3").textContent, ctx: !!D.querySelector(".tl-d-ctx .tl-line"), comp: D.querySelectorAll(".tl-d-ctx .tl-mk.warn").length,
+      hit: D.querySelectorAll(".tl-d-hit .tl-fill").length, workers: D.querySelectorAll(".tl-wk-r").length, stops: D.querySelector(".tl-chips")?.textContent || "", stats: D.querySelector(".tl-d-stats").textContent };
+  });
+  expect("drill-down: context curve + compaction drops, per-request hit, stops, workers", s.vis && /telemetry store/.test(s.title) && s.ctx && s.comp >= 1 && s.hit === 412 && s.workers === 3 && /tool use/.test(s.stops) && /\$18\.40/.test(s.stats), s);
+  bx = await d.locator("#telemetry .tl-d-ctx svg").boundingBox();
+  await d.mouse.move(bx.x + bx.width * 0.5, bx.y + bx.height / 2);
+  expect("drill-down: context tooltip", /Request #/.test(await d.evaluate(() => document.querySelector(".tl-tip").textContent)));
+  await d.mouse.move(5, 5);
+  await shot(d, "desktop-7-session-detail");
+  await d.keyboard.press("Escape");
+  await d.waitForTimeout(400);
+  s = await d.evaluate(() => ({ det: document.querySelector("#telemetry .tl-detail").classList.contains("hidden"), view: !document.getElementById("telemetry").classList.contains("hidden") }));
+  expect("Escape closes the detail first, view stays", s.det && s.view, s);
+  const old = SESS.rows.find((r) => r.hit_pct === null && r.id !== STAR.session.id);
+  await d.fill("#telemetry .tl-search input", old.id);
+  await d.waitForFunction((id) => document.querySelector("#telemetry [data-p=sessions] tbody tr")?.dataset.id === id, old.id, { timeout: 5000 }).catch(() => {});
+  await settled(d);
+  s = await d.evaluate(() => document.querySelector("#telemetry [data-p=sessions] tbody tr").textContent);
+  expect("sessions: null hit % renders as —, never 0", s.includes("—"), s);
+  await d.click("#telemetry [data-p=sessions] tbody tr");
+  await d.waitForSelector("#telemetry .tl-d-empty", { timeout: 5000 }).catch(() => {});
+  s = await d.evaluate(() => document.querySelector("#telemetry .tl-d-empty")?.textContent || null);
+  expect("drill-down: empty timeline → note", /No request-level data for this session/.test(s || ""), s);
+  await shot(d, "desktop-8-session-empty");
+  await d.click("#telemetry .tl-scrim", { position: { x: 30, y: 300 } });
+  await d.waitForTimeout(400);
+  expect("scrim closes the detail", await d.evaluate(() => document.querySelector("#telemetry .tl-detail").classList.contains("hidden")));
+
+  // polling: summary every 10s while open, none once closed
+  const n0 = d.log.filter((r) => r.name === "summary").length;
+  await d.waitForTimeout(10600);
+  const n1 = d.log.filter((r) => r.name === "summary").length;
+  expect("polls /summary every 10s while open", n1 - n0 >= 1, { n0, n1 });
+  await d.keyboard.press("Escape");
+  await d.waitForTimeout(500);
+  s = await d.evaluate(() => ({ hidden: document.getElementById("telemetry").classList.contains("hidden"), hash: location.hash, on: document.getElementById("main").classList.contains("tl-on"), thread: getComputedStyle(document.getElementById("scroller")).visibility }));
+  expect("Escape returns to the session view", s.hidden && !s.on && !s.hash.startsWith("#telemetry") && s.thread === "visible", s);
+  const n2 = d.log.filter((r) => r.name === "summary").length;
+  await d.waitForTimeout(10600);
+  expect("no polling once closed", d.log.filter((r) => r.name === "summary").length === n2, n2);
+
+  // back button + deep link
+  await d.click("#open-telemetry"); await settled(d);
+  await d.goBack(); await d.waitForTimeout(500);
+  expect("browser back closes the view", await d.evaluate(() => document.getElementById("telemetry").classList.contains("hidden") && !location.hash.startsWith("#telemetry")));
+  await d.goForward(); await d.waitForTimeout(500);
+  expect("forward reopens it", await d.evaluate(() => !document.getElementById("telemetry").classList.contains("hidden")));
+  await d.click("#telemetry .tl-close"); await d.waitForTimeout(400);
+  await d.goto(new URL("/#telemetry", url).href); await settled(d);
+  s = await d.evaluate(() => ({ open: !document.getElementById("telemetry").classList.contains("hidden"), hash: location.hash }));
+  await d.waitForTimeout(1500); // the app attaches a session meanwhile: the hash must stay
+  s.hashAfterAttach = await d.evaluate(() => location.hash);
+  expect("deep link #telemetry opens the view and keeps the hash through attach", s.open && s.hash === "#telemetry" && s.hashAfterAttach === "#telemetry", s);
+  await d.click("#telemetry .tl-close"); await d.waitForTimeout(400);
+  s = await d.evaluate(() => ({ hidden: document.getElementById("telemetry").classList.contains("hidden"), hash: location.hash, sid: typeof S !== "undefined" ? S.sid : null }));
+  expect("close after deep link → #s=<session>", s.hidden && (s.sid ? s.hash === `#s=${s.sid}` : !s.hash.startsWith("#telemetry")), s);
+  const li = await d.$("#rail li[data-id]");
+  if (li) {
+    await d.click("#open-telemetry"); await settled(d);
+    await li.click(); await d.waitForTimeout(600);
+    expect("picking a session in the rail leaves the view", await d.evaluate(() => document.getElementById("telemetry").classList.contains("hidden") && !location.hash.startsWith("#telemetry")));
+  }
+  expect("desktop: no page errors", d.errs.length === 0, d.errs);
+
+  // ── one endpoint fails → only its panels ──
+  // today's backend: no live list, no per-agent spend, no linked timelines
+  const e = await page({ fails: new Set(["cache"]), summary: (x) => { x.now.live_sessions = null; x.now.live_workers = null; x.now.ttft_p50_ms_1h = null; return x; },
+    agents: (x) => { x.agents.forEach((a) => { a.requests = null; a.spend = null; a.models = []; }); return x; }, star: (x) => ({ ...x, timeline: [], workers: x.workers.map((w) => ({ ...w, spend: null })) }) });
+  await e.click("#open-telemetry");
+  await settled(e);
+  const es = await panelState(e);
+  expect("cache 500: hit/keepwarm/writes/miss show the error", ["hit", "keepwarm", "writes", "miss"].every((id) => es[id] === "err"), es);
+  expect("cache 500: every other panel still renders", PANELS.filter((id) => !["hit", "keepwarm", "writes", "miss"].includes(id)).every((id) => es[id] === "ok"), es);
+  s = await e.evaluate(() => ({ err: document.querySelector("#telemetry [data-p=hit] .tl-err")?.textContent.replace(/\s+/g, " "), tiles: [...document.querySelectorAll("#telemetry .tl-tile[data-k]")].map((t) => `${t.dataset.k}=${t.querySelector(".tl-tile-v span").textContent}|${t.querySelector(".tl-tile-s").textContent}`) }));
+  expect("error names the endpoint, status and the {error} body", /\/api\/telemetry\/cache/.test(s.err) && /500 · boom/.test(s.err) && /Retry/.test(s.err), s.err);
+  expect("null → — (never 0), and says why", s.tiles.some((t) => t.startsWith("live=—|") && /not tracked/.test(t)) && s.tiles.some((t) => t.startsWith("ttft=—|")), s.tiles);
+  s = await e.evaluate(() => ({ spend: [...document.querySelectorAll("#telemetry [data-p=agents] tbody tr")].map((tr) => tr.children[3].textContent), runs: [...document.querySelectorAll("#telemetry [data-p=agents] tbody tr")].map((tr) => +tr.children[1].textContent.replace(/,/g, "")),
+    pending: document.querySelector("#telemetry [data-p=agents] .tl-pending")?.textContent }));
+  expect("agents without spend: —, ranked by runs, pending note", s.spend.every((x) => x === "—") && s.runs[0] >= s.runs[1] && /telemetry PR/.test(s.pending || ""), s);
+  await shot(e, "desktop-10-pending-agents", '.tl-sec[data-sec="money"]');
+  await shot(e, "desktop-9-error-panel", '.tl-sec[data-sec="cache"]');
+  await e.unroute("**/api/telemetry/**");
+  await mock(e.context());
+  await e.click('#telemetry [data-p=hit] .tl-retry');
+  await settled(e);
+  expect("Retry recovers the panel", (await panelState(e)).hit === "ok");
+  expect("error page: no page errors", e.errs.length === 0, e.errs);
+
+  // ── mobile ──
+  const m = await page({ width: 390, height: 844, touch: true });
+  s = await m.evaluate(() => { const b = document.getElementById("open-telemetry").getBoundingClientRect(); return { right: b.right, vw: innerWidth, top: b.top }; });
+  expect("mobile: header button on screen", s.right <= s.vw && s.top < 56, s);
+  await m.tap("#open-telemetry"); await m.waitForTimeout(700);
+  await settled(m);
+  s = await m.evaluate(() => {
+    const R = document.getElementById("telemetry");
+    const tiles = [...R.querySelectorAll(".tl-tile")].map((t) => Math.round(t.getBoundingClientRect().left));
+    const hm = R.querySelector(".tl-heat").getBoundingClientRect();
+    return { drawer: document.getElementById("app").classList.contains("rail-open"), open: !R.classList.contains("hidden"), overflowX: R.scrollWidth - R.clientWidth,
+      cols: new Set(tiles).size, heatRight: hm.right, vw: innerWidth, close: R.querySelector(".tl-close").getBoundingClientRect().right <= innerWidth };
+  });
+  expect("mobile: opens from the header", s.open && !s.drawer, s);
+  expect("mobile: no horizontal overflow, 2-col strip, heatmap fits", s.overflowX <= 0 && s.cols === 2 && s.heatRight <= s.vw && s.close, s);
+  for (const [name, sel] of [["mobile-1-live", null], ["mobile-2-money", '.tl-sec[data-sec="money"]'], ["mobile-3-cache", '.tl-sec[data-sec="cache"]'], ["mobile-4-latency", '.tl-sec[data-sec="latency"]'], ["mobile-5-sessions", '.tl-sec[data-sec="sessions"]'], ["mobile-6-health", '[data-p="heatmap"]'], ["mobile-6b-health", '[data-p="stops"]']]) await shot(m, name, sel);
+  await m.evaluate(() => document.querySelector('#telemetry [data-p="spend"]').scrollIntoView({ block: "center" }));
+  bx = await m.locator("#telemetry [data-p=spend] svg").boundingBox();
+  await m.tap("#telemetry [data-p=spend] svg", { position: { x: bx.width * 0.7, y: bx.height / 2 } });
+  await m.waitForTimeout(200);
+  expect("mobile: tap shows a tooltip and it stays", await m.evaluate(() => document.querySelector(".tl-tip").classList.contains("on")));
+  await m.tap("#telemetry .tl-title"); await m.waitForTimeout(200);
+  expect("mobile: tapping elsewhere hides it", !(await m.evaluate(() => document.querySelector(".tl-tip").classList.contains("on"))));
+  await m.fill("#telemetry .tl-search input", STAR.session.id);
+  await m.waitForFunction(() => document.querySelectorAll("#telemetry [data-p=sessions] tbody tr").length === 1, null, { timeout: 5000 }).catch(() => {});
+  await settled(m);
+  await m.tap("#telemetry [data-p=sessions] tbody tr");
+  await m.waitForSelector("#telemetry .tl-d-ctx svg", { timeout: 5000 }).catch(() => {});
+  s = await m.evaluate(() => { const r = document.querySelector("#telemetry .tl-detail").getBoundingClientRect(); return { w: Math.round(r.width), vw: innerWidth }; });
+  expect("mobile: session detail is full-width", s.w === s.vw, s);
+  await shot(m, "mobile-7-session-detail");
+  await m.tap("#telemetry .tl-d-close"); await m.waitForTimeout(400);
+  await m.tap("#telemetry .tl-close"); await m.waitForTimeout(500);
+  expect("mobile: close returns to the session", await m.evaluate(() => document.getElementById("telemetry").classList.contains("hidden")));
+  expect("mobile: no page errors", m.errs.length === 0, m.errs);
+
+  // ── reduced motion ──
+  const r = await page({ reduced: true });
+  await r.click("#open-telemetry");
+  await settled(r);
+  s = await r.evaluate(() => {
+    const R = document.getElementById("telemetry");
+    const running = document.getAnimations().filter((a) => R.contains(a.effect?.target) && a.playState === "running" && !(a.effect?.target?.closest?.(".tl-skel"))).length;
+    const line = R.querySelector("[data-p=hit] .tl-line"), card = R.querySelector(".tl-card");
+    const tile = R.querySelector('.tl-tile[data-k="req"] .tl-tile-v span');
+    return { running, dash: getComputedStyle(line).strokeDashoffset, cardAnim: getComputedStyle(card).animationName, tile: tile.textContent, opacity: getComputedStyle(card).opacity };
+  });
+  expect("reduced motion: no running animations, lines fully drawn, numbers final at once", s.running === 0 && (s.dash === "0" || s.dash === "0px") && s.cardAnim === "none" && /\d,\d{3}/.test(s.tile) && s.opacity === "1", s);
+  await r.click("#telemetry .tl-close");
+  expect("reduced motion: closes instantly", await r.evaluate(() => document.getElementById("telemetry").classList.contains("hidden")));
+  expect("reduced motion: no page errors", r.errs.length === 0, r.errs);
+
+  await b.close();
+  if (fail.length) { console.log("FAIL\n  " + fail.join("\n  ")); process.exit(1); }
+  console.log("telemetry: all checks pass");
+})().catch((e) => { console.error(e); process.exit(1); });

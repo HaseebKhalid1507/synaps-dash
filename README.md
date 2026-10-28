@@ -309,6 +309,7 @@ config's hash is unchanged.
 | `test/tool-views.cjs` | every tool view against real-shaped events, failure detection, folding / truncation / streamed deltas, fallbacks, HTML escaping; then a real turn with real tools |
 | `test/rail.cjs` | rail drawer: exact curves by pausing and seeking the running transitions (close in-out, open expo-out, desktop + mobile), solid panel at every step, no re-wrap, cascade, aria-expanded, mobile layout, reduced motion |
 | `test/context.cjs` | context meter: estimate on attach, measured == the wire's `Usage` after a real turn, budget/flag == a direct assessment, thresholds, formatting, compaction → estimate, popover, layout; plus Enter mid-switch keeps the message |
+| `test/telemetry.cjs` | telemetry view against a mocked `/api/telemetry/*` (fixtures in `test/fixtures/telemetry`, `gen.cjs` regenerates them): rail/header entry, `#telemetry` deep link, back + Escape, every panel, number formats and `null` → "—", range + group toggles, sort/search/paging, session drill-down (timeline + empty), one endpoint 500 → only its panels fail + Retry, 10s summary polling only while open, mobile, reduced motion. `SHOTS=dir` saves screenshots |
 | `test/live.cjs` | multi-client: mirror a peer's turn, optionally take over and submit |
 | `test/headless.cjs` | headless DOM smoke check |
 | `test/probe.ts` | raw protocol through the bridge + frame-filter refusals |
