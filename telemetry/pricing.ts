@@ -38,7 +38,7 @@ export function isVersion(model: string, version: string): boolean {
   return false;
 }
 
-const isLegacyOpus = (m: string) => ["3-opus", "opus-3", "opus-4", "opus-4-0", "opus-4-1"].some((v) => isVersion(m, v));
+export const isLegacyOpus = (m: string) => ["3-opus", "opus-3", "opus-4", "opus-4-0", "opus-4-1"].some((v) => isVersion(m, v));
 
 /** [input, output] USD per MTok. Unknown models fall back to Sonnet. */
 export function modelPrices(m: string, promptTokens: number): [number, number] {
@@ -82,8 +82,17 @@ export function costOptionalSplit(model: string, input: number, output: number, 
   return costSplit(model, input, output, cacheRead, a, b + rem);
 }
 
-/** What the cache reads saved: billed as fresh input minus billed as reads. */
-export function cacheSavings(model: string, input: number, cacheRead: number, w5m: number, w1h: number): number {
-  const [ip] = modelPrices(model, input + cacheRead + w5m + w1h);
+/** Gross: what the cache reads saved, i.e. reads billed as fresh input minus billed as reads.
+ *  `promptTokens` picks the Haiku 5.5 tier (defaults to this request's prompt). */
+export function cacheSavings(model: string, input: number, cacheRead: number, w5m: number, w1h: number, promptTokens?: number): number {
+  const [ip] = modelPrices(model, promptTokens ?? input + cacheRead + w5m + w1h);
   return (cacheRead / 1e6) * ip * (1 - cacheReadMultiplier(model));
+}
+
+/** Net: gross savings minus the write premium caching costs over plain input
+ *  (5m writes +0.25×, 1h writes +1×; TTL-unknown writes billed as 5m, like pricing.rs). */
+export function cacheNetSavings(model: string, input: number, cacheRead: number, w5m: number, w1h: number, promptTokens?: number): number {
+  const p = promptTokens ?? input + cacheRead + w5m + w1h;
+  const [ip] = modelPrices(model, p);
+  return cacheSavings(model, input, cacheRead, w5m, w1h, p) - (w5m / 1e6) * ip * 0.25 - (w1h / 1e6) * ip * 1.0;
 }
